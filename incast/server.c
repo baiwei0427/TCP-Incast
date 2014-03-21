@@ -9,6 +9,9 @@
 #include <sys/time.h>
 #include <pthread.h>
 
+//Mutex for printf of multi-threads
+pthread_mutex_t mutex;  
+
 //Start TCP server
 void start_server(int port);
 //Function to deal with an incoming connection
@@ -37,9 +40,10 @@ void start_server(int port)
 {
 	//Socket for server
 	int server_sockfd; 
-	//Socket for client (incoming connection)
-	int client_sockfd;
-	
+	//Socket pointer for client 
+	int* client_sockfd_ptr=NULL;
+	//A thread to deal with client_sockfd
+	pthread_t server_thread;
 	//Server address
 	struct sockaddr_in server_addr;
 	//Client address
@@ -68,21 +72,22 @@ void start_server(int port)
 	}
 	
 	//Start listen
-	//The maximum number of concurrent connections is 50
-	listen(server_sockfd,50);  
+	//The maximum number of concurrent connections is 100
+	listen(server_sockfd,100);  
 	int sin_size=sizeof(struct sockaddr_in); 
 	
 	while(1)
 	{
-		if((client_sockfd=accept(server_sockfd,(struct sockaddr *)&client_addr,&sin_size))<0)  
+		client_sockfd_ptr=(int*)malloc(sizeof(int));
+		int value=accept(server_sockfd,(struct sockaddr *)&client_addr,&sin_size);
+		if(value<0)  
 		{  
 			perror("accept error");  
+			free(client_sockfd_ptr);
 			return;  
 		}  
-		
-		//Start a new thread to deal with client_sockfd
-		pthread_t server_thread;
-		if(pthread_create(&server_thread, NULL , server_thread_func , (void*)&client_sockfd) < 0)
+		*client_sockfd_ptr=value;
+		if(pthread_create(&server_thread, NULL , server_thread_func, (void*)client_sockfd_ptr) < 0)
 		{
 			perror("could not create thread");
 			return;
@@ -95,15 +100,15 @@ void* server_thread_func(void* client_sockfd_ptr)
 	int i;
 	int sock=*(int*)client_sockfd_ptr;
 	char write_message[BUFSIZ+1];
-	char read_message[10]={0};
+	char read_message[1024]={0};
 	int len;
 	int data_size;
 	
 	memset(write_message,1,BUFSIZ);
 	write_message[BUFSIZ]='\0';
-	len=recv(sock,read_message,10,0);
+	len=recv(sock,read_message,1024,0);
 	data_size=atoi(read_message);
-	
+		
 	int loop=data_size/(BUFSIZ/1000);
 	//printf("%d\n", loop);
 	for(i=0;i<loop;i++)
@@ -113,6 +118,10 @@ void* server_thread_func(void* client_sockfd_ptr)
 	}
 	
 	close(sock);
+	
+	//Print throughput information
+	//pthread_mutex_lock(&mutex); 
+	//pthread_mutex_unlock(&mutex);
 	return((void *)0);
 }
 
