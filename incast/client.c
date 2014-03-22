@@ -48,6 +48,10 @@ int main(int argc, char **argv)
 	struct connection* incast_connections=NULL;
 	//Array of pthread_t
 	pthread_t* client_threads=NULL;
+	//Total start time
+	struct timeval tv_start_total;
+	//Total end time
+	struct timeval tv_end_total;
 	
 	//char* hosts[max_hosts]={"192.168.1.41","192.168.1.42","192.168.1.43","192.168.1.44","192.168.1.45","192.168.1.46","192.168.1.47","192.168.1.48","192.168.1.49","192.168.1.50","192.168.1.51","192.168.1.52","192.168.1.53","192.168.1.54","192.168.1.55"};
 	
@@ -65,6 +69,7 @@ int main(int argc, char **argv)
 	incast_connections=(struct connection*)malloc(connections*sizeof(struct connection));
 	client_threads=(pthread_t*)malloc(connections*sizeof(pthread_t));
 	
+	gettimeofday(&tv_start_total,NULL);
 	for(i=0;i<connections;i++)
 	{
 		incast_connections[i].port=port;
@@ -77,7 +82,17 @@ int main(int argc, char **argv)
 			perror("could not create client thread");
 		}	
 	}
-	sleep(5);
+	
+	for(i=0;i<connections;i++)
+	{
+		pthread_join(client_threads[i], NULL);  
+	}
+	gettimeofday(&tv_end_total,NULL);
+	//Time interval (unit: microsecond)
+	unsigned long interval=(tv_end_total.tv_sec-tv_start_total.tv_sec)*1000000+(tv_end_total.tv_usec-tv_start_total.tv_usec);
+	//KB->bit 1024*8
+	float throughput=data_size*connections*1024*8.0/interval;
+	printf("[Total] 0-%lu ms, %d KB, %.1f Mbps\n",interval/1000,data_size*connections,throughput);
 	return 0;
 }
 
@@ -150,11 +165,11 @@ void* client_thread_func(void* connection_ptr)
 	//Time interval (unit: microsecond)
 	unsigned long interval=(tv_end.tv_sec-tv_start.tv_sec)*1000000+(tv_end.tv_usec-tv_start.tv_usec);
 	//KB->bit 1024*8
-	int throughput=size*1024*8/interval;
+	float throughput=size*1024*8.0/interval;
 	
 	//Print throughput information
 	pthread_mutex_lock(&mutex); 
-	printf("[%d] From %s 0-%lu ms, %d KB, %d Mbps\n",id,IPaddress,interval/1000,size,throughput);
+	printf("[%d] From %s 0-%lu ms, %d KB, %.1f Mbps\n",id,IPaddress,interval/1000,size,throughput);
 	pthread_mutex_unlock(&mutex); 
 	return((void *)0);
 }
