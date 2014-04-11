@@ -25,6 +25,12 @@
 #include <asm/uaccess.h> /* copy_from/to_user */
 #include <asm/byteorder.h>
 
+#include "hash.h"
+
+#define MSS 1460 //MSS: 1460 bytes
+#define MIN_RTT 100	//Base RTT: 100 us
+#define MIN_RWND 2	//Minimal Window: 2MSS for ICTCP
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("BAI Wei baiwei0427@gmail.com");
 MODULE_VERSION("1.0");
@@ -41,7 +47,7 @@ static struct nf_hook_ops nfho_incoming;
 
 //Function to calculate microsecond-granularity TCP timestamp value
 //Current TCP timestamp value is jiffies (4ms-granularity in our testbed)
-unsigned int get_tsval()
+static unsigned int get_tsval()
 {
 	//Get current time. Then transfer it from nanosecond to microsecond 
 	//2^10=1024 
