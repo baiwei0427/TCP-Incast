@@ -29,11 +29,35 @@ struct FlowTable{
 	int size;               //total number of nodes in this table
 };
 
+//Print a flow information
+//Type: Add(0) Delete(1)
+static void Print_Flow(struct Flow* f, int type)
+{
+	char src_ip[16]={0};           //Source IP address 
+	char dst_ip[16]={0};           //Destination IP address 
+	
+	snprintf(src_ip, 16, "%pI4", &(f->src_ip));
+	snprintf(dst_ip, 16, "%pI4", &(f->dst_ip));
+	
+	if(type==0)
+	{
+		printk(KERN_INFO "Insert a Flow record: %s:%hu to %s:%hu \n",src_ip,f->src_port,dst_ip,f->dst_port);
+	}
+	else if(type==1)
+	{
+		printk(KERN_INFO "Delete a Flow record: %s:%hu to %s:%hu \n",src_ip,f->src_port,dst_ip,f->dst_port);
+	}
+	else
+	{
+		printk(KERN_INFO "Unknown types\n");
+	}
+}
+
 //Hash function, calculate the flow should be inserted into which RuleList
 static unsigned int Hash(struct Flow* f)
 {
 	//<src_ip, dst_ip, src_port, dst_port> identifies a flow
-	return (f->src_ip/(256*256*256)+1)*(f->dst_ip/(256*256*256)+1)*(f->src_port+1)*(f->dst_port+1)%HASH_RANGE;
+	return ((f->src_ip/(256*256*256)+1)*(f->dst_ip/(256*256*256)+1)*(f->src_port+1)*(f->dst_port+1))%HASH_RANGE;
 }
 
 //Determine whether two Flows are equal 
@@ -49,8 +73,10 @@ static void Init_Info(struct Info* i)
 	i->ack_bytes=0;		
 	i->srtt=0;	
 	i->rwnd=0;	
-	i->prio=1;			
-	i->phase=1;			
+	i->prio=0;			
+	i->phase=0;		
+	i->size=0;
+	i->last_update=0;
 }
 
 //Initialize a Flow structure
@@ -121,6 +147,7 @@ static int Insert_List(struct FlowList* fl, struct Flow* f)
 			//If pointer to next node is NULL, we find the tail of this FlowList. Here we can insert our new Flow
             if(tmp->next==NULL)
             {
+				Print_Flow(f,0);
                 tmp->next=vmalloc(sizeof(struct FlowNode));
                 //Copy data for this new FlowNode
                 tmp->next->f=*f;
@@ -147,7 +174,8 @@ static int Insert_List(struct FlowList* fl, struct Flow* f)
 }
 
 //Insert a flow to FlowTable
-static void Insert_Table(struct FlowTable* ft,struct Flow* f)
+//If success, return 1. Else, return 0
+static int Insert_Table(struct FlowTable* ft,struct Flow* f)
 {
 	int result=0;
 	unsigned int index=Hash(f);
@@ -156,6 +184,8 @@ static void Insert_Table(struct FlowTable* ft,struct Flow* f)
 	result=Insert_List(&(ft->table[index]),f);
 	//Increase the size of FlowTable
 	ft->size+=result;
+	
+	return result;
 }
 
 //Search the information for a given flow in a FlowList
@@ -163,13 +193,10 @@ static void Insert_Table(struct FlowTable* ft,struct Flow* f)
 //We can modify the information of this flow  
 static struct Info* Search_List(struct FlowList* fl, struct Flow* f)
 {
-	struct Info* info_pointer;
-	Init_Info(info_pointer);
-
 	//The length of FlowList is 0
 	if(fl->len==0) 
 	{
-		return info_pointer;
+		return NULL;
 	} 
 	else 
 	{
@@ -180,16 +207,13 @@ static struct Info* Search_List(struct FlowList* fl, struct Flow* f)
 			//If pointer to next node is NULL, we find the tail of this FlowList, no more FlowNodes to search
 			if(tmp->next==NULL)
 			{
-				return info_pointer;
+				return NULL;
             }
 			//Find matching flow (matching FlowNode is tmp->next rather than tmp)
 			if(Equal(&(tmp->next->f),f))
 			{
-				//Move the pointer
-				info_pointer=&(tmp->next->f.i);
-			
 				//return the info of this Flow
-				return info_pointer;
+				return &(tmp->next->f.i);
 			}	
 			else
 			{
@@ -198,7 +222,7 @@ static struct Info* Search_List(struct FlowList* fl, struct Flow* f)
 			}
 		}
 	}
-	return info_pointer;
+	return NULL;
 }
 
 //Search the information for a given Flow in a FlowTable
@@ -234,6 +258,7 @@ static int Delete_List(struct FlowList* fl, struct Flow* f)
 			if(Equal(&(tmp->next->f),f))
 			{
 				struct FlowNode* s=tmp->next;
+				Print_Flow(f,1);
 				tmp->next=s->next;
 				//Delete matching FlowNode from this FlowList
 				vfree(s);
@@ -252,7 +277,8 @@ static int Delete_List(struct FlowList* fl, struct Flow* f)
 }
 
 //Delete a Flow from FlowTable
-static void Delete_Table(struct FlowTable* ft,struct Flow* f)
+//If success, return 1. Else, return 0
+static int Delete_Table(struct FlowTable* ft,struct Flow* f)
 {
 	int result=0;
 	unsigned int index=0;
@@ -261,6 +287,8 @@ static void Delete_Table(struct FlowTable* ft,struct Flow* f)
 	result=Delete_List(&(ft->table[index]),f);
 	//Reduce the size of FlowTable by one
 	ft->size-=result;
+	//printk(KERN_INFO "Delete %d \n",result);
+	return result;
 }
 
 //Clear a FlowList
@@ -287,6 +315,7 @@ static void Empty_Table(struct FlowTable* ft)
 	}
 	vfree(ft->table);
 }
+
 
 
 #endif 

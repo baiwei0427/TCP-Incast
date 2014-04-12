@@ -5,11 +5,13 @@
 //ack_bytes: Latest Acknowledgement Sequence Number
 //srtt: Smoothed Round Trip Time (us)
 //rwnd: Receive Window (MSS)
-//phase: TCP phase Slow Start (1) or Congestion Avoidance (0)
-//prio: Priority of this flow High (1) or Low (0) 
+//phase: TCP phase Slow Start (0) or Congestion Avoidance (1)
+//prio: Priority of this flow High (0) or Low (1) 
+//size: The total amount of traffic in the latest RTT
+//last_update: Last update time (us)
 
 //The structure of Info is very important for both PAC and ICTCP
-//ICTCP requires srtt and rwnd
+//ICTCP requires srtt, rwnd, size and last_update
 //PAC requires ack_bytes, phase and prio 
 struct Info{
 
@@ -18,6 +20,8 @@ struct Info{
 	unsigned short rwnd;
 	unsigned short phase;
 	unsigned short prio;
+	unsigned int size;
+	unsigned int last_update;
 	
 };
 
