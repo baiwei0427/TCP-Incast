@@ -49,7 +49,7 @@ static void Print_Flow(struct Flow* f, int type)
 	}
 	else
 	{
-		printk(KERN_INFO "Unknown types\n");
+		printk(KERN_INFO "Flow record: %s:%hu to %s:%hu \n",src_ip,f->src_port,dst_ip,f->dst_port);
 	}
 }
 
@@ -64,7 +64,15 @@ static unsigned int Hash(struct Flow* f)
 //<src_ip, dst_ip, src_port, dst_port> identifies a flow 
 static int Equal(struct Flow* f1,struct Flow* f2)
 {
-	return (f1->src_ip==f2->src_ip)&&(f1->dst_ip==f2->dst_ip)&&(f1->src_port==f2->src_port)&&(f1->dst_port==f2->dst_port);
+	if((f1->src_ip==f2->src_ip)&&(f1->dst_ip==f2->dst_ip)&&(f1->src_port==f2->src_port)&&(f1->dst_port==f2->dst_port))
+	{
+		return 1;
+	}
+	else
+	{
+		return 0;
+	}
+		
 }
 
 //Initialize a Info structure
@@ -135,6 +143,7 @@ static int Insert_List(struct FlowList* fl, struct Flow* f)
 {
 	if(fl->len>=QUEUE_SIZE) 
 	{
+		printk(KERN_INFO "No enough space in this link list\n");
 		return 0;
 	} 
 	else 
@@ -144,10 +153,9 @@ static int Insert_List(struct FlowList* fl, struct Flow* f)
         //Come to the tail of this FlowList
         while(1)
         {
-			//If pointer to next node is NULL, we find the tail of this FlowList. Here we can insert our new Flow
-            if(tmp->next==NULL)
+            if(tmp->next==NULL)//If pointer to next node is NULL, we find the tail of this FlowList. Here we can insert our new Flow
             {
-				Print_Flow(f,0);
+				//Print_Flow(f,0);
                 tmp->next=vmalloc(sizeof(struct FlowNode));
                 //Copy data for this new FlowNode
                 tmp->next->f=*f;
@@ -158,13 +166,12 @@ static int Insert_List(struct FlowList* fl, struct Flow* f)
                 //Finish the insert
                 return 1;
 			}
-			//If the rule of next node is the same as our inserted flow, we just finish the insert  
-			else if(Equal(&(tmp->next->f),f))
+			else if(Equal(&(tmp->next->f),f)==1) //If the rule of next node is the same as our inserted flow, we just finish the insert  
 			{
+				//printk(KERN_INFO "Equal Flow\n");
 				return 0;
 			}
-			//Move to next FlowNode
-            else
+            else //Move to next FlowNode
             {
 				tmp=tmp->next;
             }
@@ -179,7 +186,8 @@ static int Insert_Table(struct FlowTable* ft,struct Flow* f)
 {
 	int result=0;
 	unsigned int index=Hash(f);
-		
+	
+	//printk(KERN_INFO "Insert to link list %d\n",index);
 	//Insert Flow to appropriate FlowList based on Hash value
 	result=Insert_List(&(ft->table[index]),f);
 	//Increase the size of FlowTable
@@ -210,7 +218,7 @@ static struct Info* Search_List(struct FlowList* fl, struct Flow* f)
 				return NULL;
             }
 			//Find matching flow (matching FlowNode is tmp->next rather than tmp)
-			if(Equal(&(tmp->next->f),f))
+			else if(Equal(&(tmp->next->f),f)==1)
 			{
 				//return the info of this Flow
 				return &(tmp->next->f.i);
@@ -241,6 +249,7 @@ static int Delete_List(struct FlowList* fl, struct Flow* f)
 	//No node in current FlowList
 	if(fl->len==0) 
 	{
+		printk(KERN_INFO "No node in current list\n");
 		return 0;
 	}
 	else 
@@ -249,16 +258,16 @@ static int Delete_List(struct FlowList* fl, struct Flow* f)
 
 		while(1)	
 		{
-			//If pointer to next node is NULL, we find the tail of this RuleList, no more RuleNodes, return 0
-			if(tmp->next==NULL)
+			if(tmp->next==NULL) //If pointer to next node is NULL, we find the tail of this RuleList, no more RuleNodes, return 0
 			{
+				printk(KERN_INFO "There are %d flows in this list\n",fl->len);
 				return 0;
 			}
-			//Find the matching rule (matching FlowNode is tmp->next rather than tmp), delete rule and return 1
-			if(Equal(&(tmp->next->f),f))
+			else if(Equal(&(tmp->next->f),f)==1) //Find the matching rule (matching FlowNode is tmp->next rather than tmp), delete rule and return 1
 			{
 				struct FlowNode* s=tmp->next;
-				Print_Flow(f,1);
+				//Print_Flow(&(tmp->next->f),2);
+				
 				tmp->next=s->next;
 				//Delete matching FlowNode from this FlowList
 				vfree(s);
@@ -266,8 +275,10 @@ static int Delete_List(struct FlowList* fl, struct Flow* f)
 				fl->len--;
 				return 1;
 			}
-			else
+			else //Unmatch
 			{
+				//Print_Flow(f,2);
+				//Print_Flow(&(tmp->next->f),2);
 				//Move to next FlowNode
 				tmp=tmp->next;
 			}
@@ -283,6 +294,7 @@ static int Delete_Table(struct FlowTable* ft,struct Flow* f)
 	int result=0;
 	unsigned int index=0;
 	index=Hash(f);
+	//printk(KERN_INFO "Delete from link list %d\n",index);
 	//Delete Flow from appropriate FlowList based on Hash value
 	result=Delete_List(&(ft->table[index]),f);
 	//Reduce the size of FlowTable by one
@@ -316,6 +328,37 @@ static void Empty_Table(struct FlowTable* ft)
 	vfree(ft->table);
 }
 
+//Print a FlowNode
+static void Print_Node(struct FlowNode* fn)
+{
+	Print_Flow(&(fn->f),2);
+}
+
+//Print a FlowList
+static void Print_List(struct FlowList* fl)
+{
+	struct FlowNode* Ptr;
+	for(Ptr=fl->head->next;Ptr!=NULL;Ptr=Ptr->next)
+	{
+		Print_Node(Ptr);
+	}
+}
+
+//Print a FlowTable
+static void Print_Table(struct FlowTable* ft)
+{
+	int i=0;
+	printk(KERN_INFO "Current flow table:\n");
+	for(i=0;i<HASH_RANGE;i++)
+	{
+		if(ft->table[i].len>0)
+		{
+			printk(KERN_INFO "FlowList %d\n",i);
+			Print_List(&(ft->table[i]));          
+        }
+    }
+	printk(KERN_INFO "There are %d flows in total\n",ft->size);
+}
 
 
 #endif 

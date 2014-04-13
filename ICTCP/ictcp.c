@@ -27,12 +27,13 @@
 
 #include "hash.h"
 
-#define MSS 1460 //MSS: 1460 bytes
-#define MIN_RTT 100	//Base RTT: 100 us. This is initial value of srtt of each flow
-#define MIN_RWND 2	//Minimal Window: 2MSS for ICTCP
-#define FIRST_SUBSLOT 0 //Status in first subslot
-#define SECOND_SUBSLOT 1 //Status in second subslot
-
+#define MSS 1460				//MSS: 1460 bytes
+#define MIN_RTT 100				//Base RTT: 100 us. This is initial value of srtt of each flow
+#define MIN_RWND 2				//Minimal Window: 2MSS for ICTCP
+#define FIRST_SUBSLOT 0			//Status in first subslot
+#define SECOND_SUBSLOT 1 		//Status in second subslot
+#define US_TO_NS(x)	(x * 1E3L)  //microsecond to nanosecond
+#define MS_TO_NS(x)	(x * 1E6L)  //millisecond to nanosecond
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("BAI Wei baiwei0427@gmail.com");
@@ -50,11 +51,15 @@ static unsigned short globalstatus;
 static struct FlowTable ft;
 
 //Total value of all RTT samples (us)
-static unsigned int total_rtt;
+static unsigned long total_rtt;
 //Sample RTT numbers
 static unsigned int samples;
 //Average RTT (us)
-static unsigned int avg_rtt;
+static unsigned long avg_rtt;
+//Total traffic volume in latest RTT
+static unsigned long total_traffic;
+//Free capacity for flows to increase window
+static unsigned int capacity;
 
 //Outgoing packets POSTROUTING
 static struct nf_hook_ops nfho_outgoing;
@@ -63,7 +68,7 @@ static struct nf_hook_ops nfho_incoming;
 
 //Function to calculate microsecond-granularity TCP timestamp value
 static unsigned int get_tsval()
-{	//2^10=1024 In theory, 32bit TCP timestamp value should be enough 
+{	
 	return (unsigned int)(ktime_to_ns(ktime_get())>>10);
 }
 
@@ -130,7 +135,7 @@ static unsigned int tcp_modify_outgoing(struct sk_buff *skb, unsigned short win)
 }
 
 //Function to modify microsecond-granularity TCP timestamp option back to millisecond-granularity
-//If successfully, return 1
+//If successfully, return the value of sample RTT
 //Else, return 0
 static unsigned int tcp_modify_incoming(struct sk_buff *skb)
 {
@@ -139,6 +144,7 @@ static unsigned int tcp_modify_incoming(struct sk_buff *skb)
 	unsigned char *tcp_opt=NULL;	 //TCP option
 	unsigned int *tsecr=NULL;	     //TCP timestamp option
 	int tcplen=0;                    //Length of TCP
+	unsigned int rtt=0;				 //Sample RTT
 	
 	if (skb_linearize(skb)!= 0) 
 	{
@@ -169,7 +175,8 @@ static unsigned int tcp_modify_incoming(struct sk_buff *skb)
 		tsecr=(unsigned int*)(tcp_opt+6);
 				
 		//Calculate one RTT sample
-		//printk(KERN_INFO "RTT sample: %u\n",get_tsval()-ntohl(*tsecr));
+		rtt=get_tsval()-ntohl(*tsecr);
+		//printk(KERN_INFO "RTT sample: %u\n",rtt);
 				
 		//Modify TCP TSecr back to jiffies
 		//Don't disturb TCP. Wrong TCP timestamp echo reply may reset TCP connections
@@ -191,7 +198,7 @@ static unsigned int tcp_modify_incoming(struct sk_buff *skb)
 								  
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
 	
-	return 1;
+	return rtt;
 } 
 
 //POSTROUTING for outgoing packets
@@ -201,6 +208,8 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 	struct tcphdr *tcp_header;       //TCP header struct
 	unsigned short int dst_port;     //TCP destination port
 	struct Flow f;
+	struct Info* info_pointer=NULL;
+	unsigned long flags;         //variable for save current states of irq
 	
 	ip_header=(struct iphdr *)skb_network_header(skb);
 
@@ -236,7 +245,12 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 				f.i.size=0;
 				f.i.last_update=get_tsval();
 				
-				Insert_Table(&ft,&f);
+				spin_lock_irqsave(&globalLock,flags);
+				if(Insert_Table(&ft,&f)==0)
+				{
+					printk(KERN_INFO "Insert fails\n");
+				}
+				spin_unlock_irqrestore(&globalLock,flags);
 				tcp_modify_outgoing(skb,MIN_RWND);
 			}
 			else if(tcp_header->fin||tcp_header->rst)
@@ -247,12 +261,36 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 				f.src_port=ntohs(tcp_header->source);
 				f.dst_port=ntohs(tcp_header->dest);
 				Init_Info(&(f.i));
-				Delete_Table(&ft,&f);
+				
+				spin_lock_irqsave(&globalLock,flags);
+				if(Delete_Table(&ft,&f)==0)
+				{
+					printk(KERN_INFO "Delete fails\n");
+				}
+				spin_unlock_irqrestore(&globalLock,flags);
 				tcp_modify_outgoing(skb,MIN_RWND);
 			}
 			else
 			{
-				tcp_modify_outgoing(skb,MIN_RWND);
+				f.src_ip=ip_header->saddr;
+				f.dst_ip=ip_header->daddr;
+				f.src_port=ntohs(tcp_header->source);
+				f.dst_port=ntohs(tcp_header->dest);
+				Init_Info(&(f.i));
+				
+				info_pointer=Search_Table(&ft,&f);
+				if(info_pointer==NULL)	
+				{
+					printk(KERN_INFO "No this flow record\n");
+					tcp_modify_outgoing(skb,MIN_RWND);
+				}
+				else
+				{
+					spin_lock_irqsave(&globalLock,flags);
+					tcp_modify_outgoing(skb,info_pointer->rwnd);
+					info_pointer->ack_bytes=ntohl(tcp_header->ack_seq);
+					spin_unlock_irqrestore(&globalLock,flags);
+				}
 			}
 		}
 	}
@@ -266,6 +304,10 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 	struct iphdr *ip_header;         //IP  header struct
 	struct tcphdr *tcp_header;       //TCP header struct
 	unsigned short int src_port;     //TCP source port
+	struct Flow f;
+	struct Info* info_pointer=NULL;
+	unsigned int rtt;				 //Sample RTT
+	unsigned long flags;         //variable for save current states of irq
 	
 	ip_header=(struct iphdr *)skb_network_header(skb);
 
@@ -284,17 +326,128 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 		//We only use ICTCP to control incast traffic (incoming packets with src port 5001)
 		if(src_port==5001)
 		{
-			tcp_modify_incoming(skb);
+			//Modify incoming packet and get sample RTT value
+			rtt=tcp_modify_incoming(skb);
+			
+			//Search flow information in the table
+			//Note that: source and destination should be changed !!!
+			f.src_ip=ip_header->daddr;
+			f.dst_ip=ip_header->saddr;
+			f.src_port=ntohs(tcp_header->dest);
+			f.dst_port=ntohs(tcp_header->source);
+			Init_Info(&(f.i));
+			info_pointer=Search_Table(&ft,&f);
+			
+			//Update information 
+			if(info_pointer!=NULL)
+			{
+				spin_lock_irqsave(&globalLock,flags);
+				if(rtt!=0)
+				{
+					//srtt=7/8*srtt+1/8*sample RTT
+					info_pointer->srtt=(7*info_pointer->srtt+rtt)/8;
+					total_rtt+=rtt;
+					samples+=1;
+					//printk(KERN_INFO "Sample RTT:%u Smoothed RTT:%u\n",rtt,info_pointer->srtt);
+				}
+				//update flow size in this RTT
+				info_pointer->size+=skb->len-(ip_header->ihl<<2)-20-12;	
+				//update total traffic volume in this RTT	
+				total_traffic+=skb->len;	
+				spin_unlock_irqrestore(&globalLock,flags);
+			}
+			//else
+			//{
+			//	printk(KERN_INFO "No this flow record\n");
+			//}
 		}
 	}
 	
 	return NF_ACCEPT;
 }
 
+//Callback function for hr_timer
+static enum hrtimer_restart my_hrtimer_callback(struct hrtimer *timer)
+{
+	ktime_t interval,now;  
+	unsigned long flags;
+	unsigned int throughput=0; //Incoming throughput in the latest slot
+	
+	spin_lock_irqsave(&globalLock,flags);
+	//Update global status and calculate free capacity
+	if(globalstatus==FIRST_SUBSLOT)
+	{
+		globalstatus=SECOND_SUBSLOT;
+		//Calculate aggregate throughput (Mbps)
+		throughput=total_traffic*1000000*8/avg_rtt;
+		//BWa=max(0,0.9C-BWt)
+		if(throughput<900*1024*1024)
+		{
+			capacity=900*1024*1024-throughput;
+		}
+		else
+		{
+			capacity=0;
+		}
+	}
+	else
+	{
+		globalstatus=FIRST_SUBSLOT;
+	}
+	
+	//Get new average RTT
+	if(samples>0)
+	{
+		avg_rtt=total_rtt/samples;
+		if(avg_rtt<MIN_RTT)
+		{
+			avg_rtt=MIN_RTT;
+		}
+	}
+	else //No samples in this RTT
+	{
+		avg_rtt=10*MIN_RTT; //1ms is enough 
+	}
+	
+	//Print estimation information for test
+	if(throughput>=20*1024*1024) //Incoming throughput is larger than 20Mbps
+	{
+		printk(KERN_INFO "Incoming throughput:%u(Mbps) Available bandwidth:%u(Mbps) Average RTT:%lu(us) \n",throughput>>20,capacity>>20,avg_rtt); 
+	}
+	
+	//Reset global information
+	total_rtt=0;
+	samples=0;
+	total_traffic=0;
+	capacity=0;
+	spin_unlock_irqrestore(&globalLock,flags);
+	
+	//Get interval for next timeout
+	interval=ktime_set(0, US_TO_NS(avg_rtt));;
+	now = ktime_get();
+	hrtimer_forward(timer,now,interval);
+	return HRTIMER_RESTART;
+}
+
 //Called when module loaded using 'insmod'
 int init_module()
 {
-
+	ktime_t ktime;
+		
+	//Initialize Global status and other information
+	globalstatus=FIRST_SUBSLOT;
+	total_rtt=0;
+	samples=0;
+	avg_rtt=MIN_RTT;
+	total_traffic=0;
+	capacity=0;
+	
+	//Start hr_timer
+	ktime = ktime_set( 0, US_TO_NS(MIN_RTT) );
+	hrtimer_init( &hr_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL );
+	hr_timer.function = &my_hrtimer_callback;
+	hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );
+	
 	//Initialize FlowTable
 	Init_Table(&ft);
 	
@@ -313,11 +466,6 @@ int init_module()
 	nf_register_hook(&nfho_incoming);					//register hook*/
 	
 	
-	//Set initial average RTT to be 100us
-	avg_rtt=MIN_RTT;
-	total_rtt=0;
-	samples=0;
-	
 	printk(KERN_INFO "Start ICTCP kernel module\n");
 
 	return 0;
@@ -326,11 +474,19 @@ int init_module()
 //Called when module unloaded using 'rmmod'
 void cleanup_module()
 {
+	int ret;
+
+	ret = hrtimer_cancel( &hr_timer );
+	if (ret) {
+		printk("The timer was still in use...\n");
+	} 
+	
 	//Unregister two hooks
 	nf_unregister_hook(&nfho_outgoing);  
 	nf_unregister_hook(&nfho_incoming);
 	
 	//Clear flow table
+	Print_Table(&ft);
 	Empty_Table(&ft);
 	
 	printk(KERN_INFO "Stop ICTCP kernel module\n");
