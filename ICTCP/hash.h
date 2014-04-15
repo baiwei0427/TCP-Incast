@@ -273,6 +273,7 @@ static int Delete_List(struct FlowList* fl, struct Flow* f)
 				vfree(s);
 				//Reduce the length of this FlowList by one
 				fl->len--;
+				//printk(KERN_INFO "Delete a flow record\n");
 				return 1;
 			}
 			else //Unmatch

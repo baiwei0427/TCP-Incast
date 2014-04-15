@@ -16,11 +16,11 @@
 struct Info{
 
 	unsigned int ack_bytes;
-	unsigned short srtt;
-	unsigned short rwnd;
-	unsigned short phase;
-	unsigned short prio;
-	unsigned int size;
+	unsigned int srtt;
+	unsigned int rwnd;
+	unsigned short int phase;
+	unsigned short int prio;
+	unsigned long size;
 	unsigned int last_update;
 	
 };
@@ -31,8 +31,8 @@ struct Flow{
 
 	unsigned int src_ip; 		//Local IP address
 	unsigned int dst_ip; 		//Remote IP address
-	unsigned short src_port;	//Local TCP port
-	unsigned short dst_port;	//Remote TCP port
+	unsigned short int src_port;	//Local TCP port
+	unsigned short int dst_port;	//Remote TCP port
 	struct Info i;				//Information for this flow
 	
 };
