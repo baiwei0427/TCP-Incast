@@ -9,10 +9,11 @@
 #include <sys/time.h>
 #include <pthread.h>
 
-#define max_hosts 1
+#define max_hosts 35
 
 //Host list
-char *hosts[1]={"192.168.1.41"};
+char* hosts[max_hosts]={"192.168.1.41","192.168.1.42","192.168.1.43","192.168.1.44","192.168.1.45","192.168.1.46","192.168.1.47","192.168.1.48","192.168.1.49","192.168.1.50","192.168.1.51","192.168.1.52","192.168.1.53","192.168.1.54","192.168.1.55","192.168.1.101","192.168.1.102","192.168.1.103","192.168.1.104","192.168.1.105","192.168.1.106","192.168.1.107","192.168.1.108","192.168.1.109","192.168.1.110","192.168.1.111","192.168.1.112","192.168.1.113","192.168.1.114","192.168.1.115","192.168.1.116","192.168.1.117","192.168.1.118","192.168.1.119","192.168.1.120"};
+//char *hosts[1]={"192.168.1.41"};
 
 //Mutex for printf of multi-threads
 pthread_mutex_t mutex;  
@@ -93,6 +94,8 @@ int main(int argc, char **argv)
 	//KB->bit 1024*8
 	float throughput=data_size*connections*1024*8.0/interval;
 	printf("[Total] 0-%lu ms, %d KB, %.1f Mbps\n",interval/1000,data_size*connections,throughput);
+	free(incast_connections);
+	free(client_threads);
 	return 0;
 }
 
@@ -139,7 +142,11 @@ void* client_thread_func(void* connection_ptr)
 	//Establish connection
 	if(connect(sockfd,(struct sockaddr *)&servaddr,sizeof(struct sockaddr))<0)
 	{
-		perror("connect error\n");
+		//Print throughput information
+		pthread_mutex_lock(&mutex); 
+		printf("Can not connect to %s\n",IPaddress);
+		pthread_mutex_unlock(&mutex); 
+		return((void *)0);
 	}
 	
 	//Get start time
@@ -153,8 +160,7 @@ void* client_thread_func(void* connection_ptr)
 	while(1)
 	{
 		len=recv(sockfd,buf,BUFSIZ,0);
-		total+=len;
-		if(len<=0&&total>size*1000)
+		if(len<=0)
 			break;
 	}
 	
@@ -186,5 +192,5 @@ void set_send_window(int sockfd, int sndbuf)
 
 void usage()
 {
-	printf("./server.o [connections] [data_size]\n");
+	printf("./client.o [connections] [data_size]\n");
 }

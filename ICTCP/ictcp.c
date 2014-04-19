@@ -240,7 +240,7 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 		
 		//We only use ICTCP to control incast traffic (tcp port 5001)
 		if(dst_port==5001)//||src_port==5001)
-		{			
+		{
 			if(tcp_header->syn)
 			{
 				//If this is SYN packet, a new Flow record should be inserted into Flow table
@@ -256,6 +256,7 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 				f.i.size=0;
 				f.i.last_update=get_tsval();
 				
+				//spin_lock_bh(&globalLock);
 				spin_lock_irqsave(&globalLock,flags);
 				if(Insert_Table(&ft,&f)==0)
 				{
@@ -276,6 +277,7 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 				f.dst_port=ntohs(tcp_header->dest);
 				Init_Info(&(f.i));
 				
+				//spin_lock_bh(&globalLock);
 				spin_lock_irqsave(&globalLock,flags);
 				if(Delete_Table(&ft,&f)==0)
 				{
@@ -283,6 +285,7 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 				}
 				
 				connections-=1;	//Reduce Connection numbers
+				//spin_unlock_bh(&globalLock);
 				spin_unlock_irqrestore(&globalLock,flags);
 				tcp_modify_outgoing(skb,MIN_RWND);
 			}
@@ -294,15 +297,18 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 				f.dst_port=ntohs(tcp_header->dest);
 				Init_Info(&(f.i));
 				
-				spin_lock_irqsave(&globalLock,flags);
+				//spin_lock_bh(&globalLock);
+				//spin_lock_irqsave(&globalLock,flags);
 				info_pointer=Search_Table(&ft,&f);
 				if(info_pointer==NULL)	
 				{
+					//spin_unlock_irqrestore(&globalLock,flags);
 					printk(KERN_INFO "No this flow record\n");
 					tcp_modify_outgoing(skb,MIN_RWND);
 				}
 				else
 				{
+					//spin_unlock_irqrestore(&globalLock,flags);
 					//Potential time to adjust window
 					//In the second subslot 
 					//Elapsed time is larger than 2*SRTT of this connection
@@ -354,7 +360,8 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 					tcp_modify_outgoing(skb,info_pointer->rwnd);
 					info_pointer->ack_bytes=ntohl(tcp_header->ack_seq);
 				}
-				spin_unlock_irqrestore(&globalLock,flags);
+				//spin_unlock_bh(&globalLock);
+				//spin_unlock_irqrestore(&globalLock,flags);
 			}
 		}
 	}
@@ -372,7 +379,7 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 	struct Flow f;
 	struct Info* info_pointer=NULL;
 	unsigned int rtt;				 //Sample RTT
-	unsigned long flags;         	 //variable for save current states of irq
+	//unsigned long flags;         	 //variable for save current states of irq
 	unsigned long throughput=0; 	//Incoming throughput in the latest slot
 	unsigned long interval=0;       //Time interval to measure throughput
 	
@@ -454,12 +461,12 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 			f.src_port=ntohs(tcp_header->dest);
 			f.dst_port=ntohs(tcp_header->source);
 			Init_Info(&(f.i));
+			//spin_lock_irqsave(&globalLock,flags);
 			info_pointer=Search_Table(&ft,&f);
 			
 			//Update information 
 			if(info_pointer!=NULL)
 			{
-				spin_lock_irqsave(&globalLock,flags);
 				if(rtt!=0)
 				{
 					//srtt=7/8*srtt+1/8*sample RTT
@@ -470,8 +477,8 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 				}
 				//update total traffic volume in this RTT	
 				total_traffic+=skb->len;	
-				spin_unlock_irqrestore(&globalLock,flags);
 			}
+			//spin_unlock_irqrestore(&globalLock,flags);
 		}
 	}
 	
@@ -481,7 +488,10 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 
 //Called when module loaded using 'insmod'
 int init_module()
-{		
+{
+	//Initialize Lock
+	spin_lock_init(&globalLock);
+	
 	//Initialize Global status and other information
 	globalstatus=FIRST_SUBSLOT; 	//First slot is used to measure incoming throughput
 	total_rtt=0;					
