@@ -4,12 +4,12 @@
 #include <linux/vmalloc.h>
 
 #define QUEUE_SIZE 2048
-#define ECN_THRESHOLD 30000 //(bytes)
 
 struct Packet{
 
-    int (*okfn)(struct sk_buff *);  //function pointer to reinject packets
-    struct sk_buff *skb;           //socket buffer pointer to packet               
+    int (*okfn)(struct sk_buff *); //function pointer to reinject packets
+    struct sk_buff *skb;           //socket buffer pointer to packet   
+	int size;					   //The size of traffic that this ACK packet can trigger
 }; 
 
 struct PacketQueue{
@@ -54,16 +54,6 @@ static int Enqueue_PacketQueue(struct PacketQueue* q,struct sk_buff *skb,int (*o
 static int Dequeue_PacketQueue(struct PacketQueue* q)
 {
 	if(q->size>0) {
-		//Dequeue Marking
-		if(q->bytes>ECN_THRESHOLD)
-		{
-			struct iphdr *ip_header=(struct iphdr *)skb_network_header(q->packets[q->head].skb);
-			//Marking ECN
-			ip_header->tos+=0x01;
-			//Calculate IP header checksum
-			ip_header->check=0;
-			ip_header->check=ip_fast_csum(ip_header,ip_header->ihl);		
-		}
 		q->bytes-=q->packets[q->head].skb->len;
 		q->size--;
 		//Dequeue packet

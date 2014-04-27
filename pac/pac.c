@@ -25,21 +25,28 @@
 #include <linux/ktime.h>
 
 #include "queue.h"
+#include "hash.h"
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("BAI Wei wbaiab@ust.hk");
+MODULE_AUTHOR("BAI Wei baiwei0427@gmail.com");
 MODULE_VERSION("1.0");
-MODULE_DESCRIPTION("Driver module of Proactive ACK Control (ACK)");
+MODULE_DESCRIPTION("Driver module of Proactive ACK Control (PAC)");
 
-#define BUCKET 80000 //Bucket
-#define RATE 125000000 //125000000 //125M Bytes persecond (1Gbps)
+#define MIN_RTT 100	 //Base RTT: 100 us
+#define BUCKET 25000	//Base Bucket: min(2*MIN_RTT*C, Switch buffer size)
+#define BUFFER 100000	//A conservative switch buffer size value: 100KB
+#define RATE 120000000  //125000000 //125M Bytes persecond (1Gbps)
 
 //microsecond to nanosecond
 #define US_TO_NS(x)	(x * 1E3L)
 //millisecond to nanosecond
 #define MS_TO_NS(x)	(x * 1E6L)
-//Delay
+//Delay 
 static unsigned long delay_in_us = 100L;//40L
+//Incoming traffic volume (bytes) in a timeslot (2RTT)
+static int traffic=0;
+//Incoming traffic with Congestion Experienced in a timeslot
+static int ce=0;
 
 
 //Tokens in bucket
@@ -52,6 +59,8 @@ void cleanup_module(void);
 static struct PacketQueue *q=NULL;
 //Outgoing packets POSTROUTING
 static struct nf_hook_ops nfho_outgoing;
+//Incoming packets PREROUTING
+static struct nf_hook_ops nfho_incoming;
 ///High resolution timer
 static struct hrtimer hr_timer;
 //Old time value
@@ -71,6 +80,7 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 	struct iphdr *ip_header;   //ip header struct
 	struct tcphdr *tcp_header; //tcp header struct
 	unsigned long flags;       //variable for save current states of irq
+	int len;                   //len of traffic that ACK packet can trigger
 
 	ip_header=(struct iphdr *)skb_network_header(skb);
 
@@ -85,14 +95,21 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 		tcp_header = (struct tcphdr *)((__u32 *)ip_header+ ip_header->ihl);
 		unsigned int dst_port=htons((unsigned short int) tcp_header->dest);
 		//We only deal with ACK packets whose dst port is 5001 
-		if(dst_port==5001&&tcp_header->ack) {
+		if(dst_port==5001) {
 
 			spin_lock_irqsave(&globalLock,flags);
-
+			
+			//Request packet with payload can trigger 3MSS
+			if(tcp_header->psh)
+				len=4542;
+			//else if(tcp_header->syn||tcp_header->fin)
+			//	len=1514;
+			else
+				len=1514;
 			//If there is no packet in the queue and tokens are enough
-			if(tokens>=2920&&q->size==0) {
+			if(tokens>=len&&q->size==0) {
 				//Reduce tokens by packet size
-				tokens=tokens-2920;
+				tokens=tokens-len;
 				spin_unlock_irqrestore(&globalLock,flags);
 				//spin_unlock_irq(&globalLock);
 				//spin_unlock(&globalLock);
@@ -118,6 +135,12 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 			}
 		}
 	}
+	return NF_ACCEPT;
+}
+
+//PREROUTING for incoming packets
+static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff *))
+{
 	return NF_ACCEPT;
 }
 
@@ -147,7 +170,10 @@ static enum hrtimer_restart my_hrtimer_callback( struct hrtimer *timer )
 		if(q->size>0) { //There are still some packets in queue 
 			//printk(KERN_INFO "%u\n",len);
 			//We assume an ACK can trigger two MSS packets
-			len=2920;
+			if(q->packets[q->head].skb->len>52)
+				len=4542;
+			else
+				len=1514;
 			if(len<=tokens) { //There are enough tokens
 				//Reduce tokens
 				tokens=tokens-len;
@@ -195,12 +221,19 @@ int init_module(void)
 	hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );
 
     //POSTROUTING
-	nfho_outgoing.hook = hook_func_out;                   //function to call when conditions below met
-	nfho_outgoing.hooknum = NF_INET_POST_ROUTING;         //called in post_routing
-	nfho_outgoing.pf = PF_INET;                           //IPV4 packets
-	nfho_outgoing.priority = NF_IP_PRI_FIRST;             //set to highest priority over all other hook functions
-	nf_register_hook(&nfho_outgoing);                     //register hook*/
-
+	nfho_outgoing.hook = hook_func_out;                   	//function to call when conditions below met
+	nfho_outgoing.hooknum = NF_INET_POST_ROUTING;         	//called in post_routing
+	nfho_outgoing.pf = PF_INET;     						//IPV4 packets
+	nfho_outgoing.priority = NF_IP_PRI_FIRST;             	//set to highest priority over all other hook functions
+	nf_register_hook(&nfho_outgoing);                     	//register hook*/
+	
+	//PREROUTING
+	nfho_incoming.hook=hook_func_in;						//function to call when conditions below met    
+	nfho_incoming.hooknum=NF_INET_PRE_ROUTING;				//called in pre_routing
+	nfho_incoming.pf = PF_INET;								//IPV4 packets
+	nfho_incoming.priority = NF_IP_PRI_FIRST;				//set to highest priority over all other hook functions
+	nf_register_hook(&nfho_incoming);						//register hook*/
+	
 	printk(KERN_INFO "Install PAC kernel module\n");
 	return 0;
 }
@@ -213,10 +246,10 @@ void cleanup_module(void)
 	if (ret) {
 		printk("The timer was still in use...\n");
 	} 
-	
-	printk(KERN_INFO "Uninstall PAC kernel module\n");
 
 	nf_unregister_hook(&nfho_outgoing);
+	nf_unregister_hook(&nfho_incoming);
 	Free_PacketQueue(q);
-
+	printk(KERN_INFO "Uninstall PAC kernel module\n");
+	
 }
