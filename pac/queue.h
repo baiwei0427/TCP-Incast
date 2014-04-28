@@ -9,7 +9,7 @@ struct Packet{
 
     int (*okfn)(struct sk_buff *); //function pointer to reinject packets
     struct sk_buff *skb;           //socket buffer pointer to packet   
-	int size;					   //The size of traffic that this ACK packet can trigger
+	//int size;					   //The size of traffic that this ACK packet can trigger
 }; 
 
 struct PacketQueue{
