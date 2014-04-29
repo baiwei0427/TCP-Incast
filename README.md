@@ -6,13 +6,17 @@ Mitigate TCP Incast congestion with Proactive ACK Control (PAC). We implement PA
 People
 ==========
 
-Wei Bai (baiwei0427@gmail.com) and Prof. Kai Chen
+Wei Bai (baiwei0427@gmail.com) 
+
+Department of Computer Science and Engineering, Hong Kong University of Science and Technology
+
+Prof. Kai Chen
 
 Department of Computer Science and Engineering, Hong Kong University of Science and Technology
 
 Haitao Wu
 
-Microsoft Redmond (previous Wireless and Networking Group in Microsoft Research Asia)
+Microsoft Redmond (previous in Wireless and Networking Group, Microsoft Research Asia)
 
 References
 =========
