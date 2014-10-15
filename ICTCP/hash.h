@@ -263,10 +263,12 @@ static struct Info* Search_Table(struct FlowTable* ft, struct Flow* f)
 }
 
 //Delete a Flow from FlowList
-//If the Flow is deleted successfully, return 1
+//If the Flow is deleted successfully, return rwnd of this flow (>0)
 //Else, return 0
-static int Delete_List(struct FlowList* fl, struct Flow* f)
+static unsigned int Delete_List(struct FlowList* fl, struct Flow* f)
 {
+	unsigned int result=0;
+	
 	//No node in current FlowList
 	if(fl->len==0) 
 	{
@@ -286,6 +288,9 @@ static int Delete_List(struct FlowList* fl, struct Flow* f)
 			}
 			else if(Equal(&(tmp->next->f),f)==1) //Find the matching rule (matching FlowNode is tmp->next rather than tmp), delete rule and return 1
 			{
+				//Get rwnd 
+				result=tmp->next->f.i.rwnd;
+				
 				struct FlowNode* s=tmp->next;
 				//Print_Flow(&(tmp->next->f),2);
 				
@@ -295,7 +300,7 @@ static int Delete_List(struct FlowList* fl, struct Flow* f)
 				//Reduce the length of this FlowList by one
 				fl->len--;
 				//printk(KERN_INFO "Delete a flow record\n");
-				return 1;
+				return result;
 			}
 			else //Unmatch
 			{
@@ -308,17 +313,18 @@ static int Delete_List(struct FlowList* fl, struct Flow* f)
 }
 
 //Delete a Flow from FlowTable
-//If success, return 1. Else, return 0
-static int Delete_Table(struct FlowTable* ft,struct Flow* f)
+//If success, return rwnd (>0) of this entry. Else, return 0
+static unsigned int Delete_Table(struct FlowTable* ft,struct Flow* f)
 {
-	int result=0;
+	unsigned int result=0;
 	unsigned int index=0;
 	index=Hash(f);
 	//printk(KERN_INFO "Delete from link list %d\n",index);
 	//Delete Flow from appropriate FlowList based on Hash value
 	result=Delete_List(&(ft->table[index]),f);
 	//Reduce the size of FlowTable by one
-	ft->size-=result;
+	if(result>0)
+		ft->size-=1;
 	//printk(KERN_INFO "Delete %d \n",result);
 	return result;
 }
