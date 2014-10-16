@@ -76,7 +76,7 @@ static void Init_Info(struct Info* i)
 {
 	i->srtt=0;	
 	i->rwnd=0;	
-	i->scale=0;
+	i->scale=1;
 	i->phase=0;		
 	i->size=0;
 	i->throughput=0;
@@ -278,6 +278,7 @@ static unsigned int Delete_List(struct FlowList* fl, struct Flow* f)
 	else 
 	{
 		struct FlowNode* tmp=fl->head;
+		struct FlowNode* s=NULL;
 
 		while(1)	
 		{
@@ -291,7 +292,7 @@ static unsigned int Delete_List(struct FlowList* fl, struct Flow* f)
 				//Get rwnd 
 				result=tmp->next->f.i.rwnd;
 				
-				struct FlowNode* s=tmp->next;
+				 s=tmp->next;
 				//Print_Flow(&(tmp->next->f),2);
 				
 				tmp->next=s->next;

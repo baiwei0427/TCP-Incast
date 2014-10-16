@@ -73,6 +73,7 @@ static struct nf_hook_ops nfho_outgoing;
 static struct nf_hook_ops nfho_incoming;
 
 //POSTROUTING for outgoing packets
+//We implement ICTCP congestion control algorithm in this function
 static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff *))
 {
 	struct iphdr *ip_header=NULL;         	//IP  header structure
@@ -81,7 +82,8 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 	unsigned short int src_port;	 	  			//TCP source port
 	struct Flow f;
 	struct Info* info_pointer=NULL;
-	unsigned short reduce=0;	 					//whether the window has been reduced due to fairness problem
+	unsigned int expected_throughput;	//expected throughput
+	//unsigned short reduce=0;	 					//whether the window has been reduced due to fairness problem
 	unsigned long flags;         	 					//variable for save current states of irq
 	unsigned long tmp=0;
 	//unsigned short increase=0;		 		//Whether this flow's rwnd has been increased
@@ -116,6 +118,7 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 				f.i.scale=tcp_get_scale(skb);
 				f.i.phase=0;
 				f.i.size=0;
+				f.i.throughput=0;
 				f.i.last_update=get_tsval();
 				
 				//spin_lock_bh(&globalLock);
@@ -172,70 +175,59 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 					printk(KERN_INFO "No this flow record\n");
 					tcp_modify_outgoing(skb,MIN_RWND*MSS, get_tsval());
 				}
+				//ICTCP congestion control algorithm 
 				else
 				{					
-					//Potential time to adjust window
-					//The control interval is larger than 2*SRTT of this connection
+					//The control interval is larger than 2*SRTT of this connection. That is potential time to adjust window
 					if(get_tsval()-info_pointer->last_update>=2*info_pointer->srtt)
 					{
-						//printk(KERN_INFO "Too large window for fairness\n"); 
-						//Fairness control
-						if(capacity<200*1024*1024 && info_pointer->rwnd>avg_wind)
+						//Update per-flow information (e.g. measured throughput )
+						spin_lock_irqsave(&globalLock,flags);
+						info_pointer->last_update=get_tsval();
+						//Smooth measured throughput in the latest control interval
+						info_pointer->throughput=max(info_pointer->size*8*1024/info_pointer->srtt*1024,(4*info_pointer->size*8*1024/info_pointer->srtt*1024+info_pointer->throughput)/5);
+						//Clear traffic size 
+						info_pointer->size=0;
+						//Calculate expected throughput for this flow 
+						expected_throughput=max((info_pointer->rwnd*MSS*8*1024/info_pointer->srtt*1024),info_pointer->throughput);
+						spin_unlock_irqrestore(&globalLock,flags);	
+							
+						//Fairness control 
+						if(capacity<200*1024*1024 && info_pointer->rwnd>avg_wind && info_pointer->rwnd>MIN_RWND)
 						{
-							info_pointer->last_update=get_tsval();
-							if(info_pointer->rwnd>MIN_RWND)
+							spin_lock_irqsave(&globalLock,flags);
+							//Reduce window by 1MSS
+							info_pointer->rwnd-=1;
+							total_wind-=1;
+							capacity+=8*MSS*1024/info_pointer->srtt*1024;
+							if(connections>0)
 							{
-								spin_lock_irqsave(&globalLock,flags);
-								//Reduce window by 1MSS
-								info_pointer->rwnd-=1;
-								total_wind-=1;
-								capacity+=8*MSS*1024/info_pointer->srtt*1024;
-								if(connections>0)
-								{
-									avg_wind=total_wind/connections;
-								}
-								else
-								{
-									avg_wind=0;
-								}
-								reduce=1;
-								spin_unlock_irqrestore(&globalLock,flags);
-								printk(KERN_INFO "There are %u connections. Their total window size is %u MSS\n",connections,total_wind);
-								printk(KERN_INFO "Reduce window by one to %u\n",info_pointer->rwnd);
+								avg_wind=total_wind/connections;
 							}
-						}
-						//Potential time to increase window in the second subslot
-						if(globalstatus==SECOND_SUBSLOT&&reduce==0)
-						{
-							info_pointer->last_update=get_tsval();
-							//If this flow is in slow start phase
-							if(info_pointer->phase==0) 
+							else
 							{
-								tmp=(8*info_pointer->rwnd*MSS/info_pointer->srtt+1)*1024*1024;
-								//printk(KERN_INFO "Slow Start: %lu Mbps VS %lu Mbps\n",capacity/1000000,tmp/1000000); 
-								//If there is enough capacity to double window 
-								if(capacity>tmp)
+								avg_wind=0;
+							}
+							spin_unlock_irqrestore(&globalLock,flags);	
+							printk(KERN_INFO "There are %u connections. Their total window size is %u MSS\n",connections,total_wind);
+							printk(KERN_INFO "Reduce window to %u for fairness\n",info_pointer->rwnd);
+							
+						}
+						//Application demand control						
+						else    
+						{							
+							//The window should be increased 
+							if((expected_throughput-info_pointer->throughput<=expected_throughput/10 || expected_throughput-info_pointer->throughput<=expected_throughput/info_pointer->rwnd)&&globalstatus==SECOND_SUBSLOT)
+							{
+								//Slow start
+								if(info_pointer->phase==0) 
 								{
-									capacity-=tmp;
-									//Double window but no larger than MAX_RWND 
-									if(2*info_pointer->rwnd>MAX_RWND)
+									tmp=(8*info_pointer->rwnd*MSS/info_pointer->srtt+1)*1024*1024;
+									//If there is enough capacity to double window 
+									if(capacity>tmp)
 									{
 										spin_lock_irqsave(&globalLock,flags);
-										total_wind+=MAX_RWND-info_pointer->rwnd;
-										if(connections>0)
-										{
-											avg_wind=total_wind/connections;
-										}
-										else
-										{
-											avg_wind=0;
-										}
-										info_pointer->rwnd=MAX_RWND;
-										spin_unlock_irqrestore(&globalLock,flags);
-									}
-									else
-									{
-										spin_lock_irqsave(&globalLock,flags);
+										capacity-=tmp;
 										total_wind+=info_pointer->rwnd;
 										if(connections>0)
 										{
@@ -247,29 +239,24 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 										}
 										info_pointer->rwnd=2*info_pointer->rwnd;
 										spin_unlock_irqrestore(&globalLock,flags);
-										//printk(KERN_INFO "Double window to %u\n",info_pointer->rwnd);
+									}
+									else //No enough capacity to double window
+									{
+										//This connection comes into congestion avoidance phase
+										spin_lock_irqsave(&globalLock,flags);
+										info_pointer->phase=1;
+										spin_unlock_irqrestore(&globalLock,flags);
 									}
 								}
-								else //No enough capacity to double window
+								//Congestion avoidance
+								else
 								{
-									//This connection comes into congestion avoidance phase
-									info_pointer->phase=1;
-								}
-							}
-							
-							//If this flow is in congestion avoidance phase
-							if(info_pointer->phase==1)//&&increase==0)
-							{
-								tmp=8*MSS*1024/info_pointer->srtt*1024;
-								//printk(KERN_INFO "Congestion Avoidance: %lu Mbps VS %lu Mbps\n",capacity/1000000,tmp/1000000); 
-								//If there is enough capacity to double window 
-								if(capacity>tmp)
-								{
-									capacity-=tmp;
-									//Increase window by 1 but no larger than MAX_RWND
-									if(info_pointer->rwnd<MAX_RWND)
+									tmp=(8*MSS/info_pointer->srtt+1)*1024*1024;
+									//If there is enough capacity to double window 
+									if(capacity>tmp)
 									{
 										spin_lock_irqsave(&globalLock,flags);
+										capacity-=tmp;
 										total_wind+=1;
 										if(connections>0)
 										{
@@ -281,9 +268,25 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 										}
 										info_pointer->rwnd+=1;
 										spin_unlock_irqrestore(&globalLock,flags);
-										//printk(KERN_INFO "Increase window by one to %u\n",info_pointer->rwnd);
 									}
 								}
+							}
+							//The window should be decreased
+							else if(expected_throughput-info_pointer->throughput>=expected_throughput/2 && info_pointer->rwnd>MIN_RWND)
+							{
+								spin_lock_irqsave(&globalLock,flags);
+								total_wind-=1;
+								if(connections>0)
+								{
+									avg_wind=total_wind/connections;
+								}
+								else
+								{
+									avg_wind=0;
+								}
+								info_pointer->rwnd-=1;
+								spin_unlock_irqrestore(&globalLock,flags);
+								printk(KERN_INFO "Reduce window to %u to meet application demand\n",info_pointer->rwnd);
 							}
 						}
 					}
@@ -298,20 +301,19 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 //PREROUTING for incoming packets
 static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff *))
 {
-	struct iphdr *ip_header;         //IP  header struct
-	struct tcphdr *tcp_header;       //TCP header struct
-	unsigned short int src_port;     //TCP source port
-	unsigned short int dst_port;	 //TCP destination port 
+	struct iphdr *ip_header;         	//IP  header struct
+	struct tcphdr *tcp_header;    	//TCP header struct
+	unsigned short int src_port;		//TCP source port
+	unsigned short int dst_port;		//TCP destination port 
 	struct Flow f;
 	struct Info* info_pointer=NULL;
-	unsigned int rtt;				 //Sample RTT
-	//unsigned long flags;         	 //variable for save current states of irq
+	unsigned int rtt;				 				//Sample RTT
+	unsigned long flags;         	 		//variable for save current states of irq
 	unsigned long throughput=0; 	//Incoming throughput in the latest slot
-	unsigned long interval=0;       //Time interval to measure throughput
-	
-	
-	//spin_lock_irqsave(&statisticLock,flags);
-	//First, we need to determine whether the interval is larger than avg_RTT
+	unsigned long interval=0;       	//Time interval to measure throughput
+		
+	//First, we need to determine whether the interval is larger than avg_RTT.
+	//If the interval is large enough, we need to update some global information
 	interval=get_tsval()-last_update;
 	if(interval>avg_rtt)
 	{
@@ -339,10 +341,6 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 		{
 			capacity=0;
 		}
-		/*if(capacity>0&&throughput!=0)
-		{
-			printk(KERN_INFO "Capcity: %lu (Mbps)\n",capacity>>20); 	
-		}*/
 		//Get new average RTT
 		if(samples>0)
 		{
@@ -364,6 +362,8 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 	//spin_unlock_irqrestore(&statisticLock,flags);
 	
 	total_traffic+=skb->len;	
+	
+	//Then, we need to update per-flow information based on incoming packets
 	ip_header=(struct iphdr *)skb_network_header(skb);
 
 	//The packet is not ip packet (e.g. ARP or others)
@@ -393,26 +393,25 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 			f.local_port=ntohs(tcp_header->dest);
 			f.remote_port=ntohs(tcp_header->source);
 			Init_Info(&(f.i));
-			//spin_lock_irqsave(&globalLock,flags);
-			info_pointer=Search_Table(&ft,&f);
 			
-			//Update information 
+			info_pointer=Search_Table(&ft,&f);
 			if(info_pointer!=NULL)
 			{
 				if(rtt!=0)
 				{
-					//srtt=7/8*srtt+1/8*sample RTT
+					spin_lock_irqsave(&globalLock,flags);
+					//Update RTT: srtt=7/8*srtt+1/8*sample RTT
 					info_pointer->srtt=(7*info_pointer->srtt+rtt)/8;
+					//Update incoming flow size
+					info_pointer->size+=skb->len;
 					total_rtt+=rtt;
 					samples+=1;
+					spin_unlock_irqrestore(&globalLock,flags);
 					//printk(KERN_INFO "Sample RTT:%u Smoothed RTT:%u\n",rtt,info_pointer->srtt);
 				}
-				//update total traffic volume in this RTT	
 			}
-			//spin_unlock_irqrestore(&globalLock,flags);
 		}
 	}
-	
 	return NF_ACCEPT;
 }
 

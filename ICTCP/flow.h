@@ -6,8 +6,8 @@
 //rwnd: Receive Window (unit: maximum segment size)
 //scale: Window scaling 
 //phase: TCP phase Slow Start (0) or Congestion Avoidance (1)
-//size: The total amount of traffic in the latest RTT (unit: bytes)
-//throughput: The sample of throughput in the latest RTT (unit: bps)
+//size: The total amount of traffic in the latest control interval (unit: bytes)
+//throughput: The sample of throughput in the latest control interval (unit: bps)
 //last_update: Last update time (unit: us)
 
 struct Info{
@@ -27,10 +27,10 @@ struct Info{
 struct Flow{
 
 	unsigned int local_ip;						//Local IP address
-	unsigned int remote_ip;				//Remote IP address
+	unsigned int remote_ip;					//Remote IP address
 	unsigned short int local_port;		//Local TCP port
-	unsigned short int remote_port;//Remote TCP port
-	struct Info i;										//Information for this flow
+	unsigned short int remote_port;	//Remote TCP port
+	struct Info i;											//Information for this flow
 	
 };
 
