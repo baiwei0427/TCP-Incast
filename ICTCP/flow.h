@@ -26,8 +26,8 @@ struct Info{
 //Flow is defined by 4-tuple <local_ip,remote_ip,local_port,remote_port> and its related information
 struct Flow{
 
-	unsigned int local_ip;						//Local IP address
-	unsigned int remote_ip;					//Remote IP address
+	unsigned int local_ip;                      //Local IP address
+	unsigned int remote_ip;				    //Remote IP address
 	unsigned short int local_port;		//Local TCP port
 	unsigned short int remote_port;	//Remote TCP port
 	struct Info i;											//Information for this flow

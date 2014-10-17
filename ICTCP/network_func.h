@@ -14,9 +14,8 @@ static unsigned int pow(unsigned int shift)
 		return pow;
 	
 	for(i=0;i<shift;i++)
-	{
 		pow=2*pow;
-	}
+        
 	return pow;
 }
 
@@ -46,9 +45,7 @@ static unsigned int tcp_get_scale(struct sk_buff *skb)
 	
 	//Minimum TCP header length=20(Raw TCP header)+10(TCP Timestamp option)+3(TCP window scale option) 
 	if(tcp_header_len<33)
-	{
 		return 1;
-	}
 	
 	//TCP option offset=IP header pointer+IP header length+TCP header length
 	tcp_opt=(unsigned char*)ip_header+ ip_header->ihl*4+20;
@@ -57,9 +54,7 @@ static unsigned int tcp_get_scale(struct sk_buff *skb)
 	{
 		//If pointer has moved out off the range of TCP option, stop current loop
 		if(tcp_opt-(unsigned char*)tcp_header>=tcp_header_len)
-		{
 			break;
-		}
 		
 		//Get value of current byte
 		tcp_opt_value=*tcp_opt;
@@ -81,7 +76,6 @@ static unsigned int tcp_get_scale(struct sk_buff *skb)
 			//Get length of this TCP option
 			tcp_opt_value=*tcp_opt;
 			option_len=(unsigned int)tcp_opt_value;
-			
 			//Move to next TCP option
 			tcp_opt=tcp_opt+1+(option_len-2);
 		}
@@ -214,8 +208,9 @@ static unsigned int tcp_modify_outgoing(struct sk_buff *skb, unsigned int win, u
 		return 0;
 	}
 	
-	//Modify TCP window
-	tcp_header->window=htons(win);
+	//Modify TCP window. Note that TCP received window should be no larger than 65535 bytes.
+    if(win<65535)
+        tcp_header->window=htons(win);
 
 	//TCP option offset=IP header pointer+IP header length+TCP header length
 	tcp_opt=(unsigned char*)ip_header+ ip_header->ihl*4+20;

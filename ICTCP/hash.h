@@ -9,25 +9,25 @@
 #include "flow.h"
 
 #define HASH_RANGE 256	//The table has HASH_RANGE link lists
-#define QUEUE_SIZE 32		//Each link list contains QUEUE_SIZE nodes at most 
+#define QUEUE_SIZE 32		    //Each link list contains QUEUE_SIZE nodes at most 
 
 
 //Link Node of Flow
 struct FlowNode{
-	struct Flow f;         //structure of Flow
+	struct Flow f;                      //structure of Flow
 	struct FlowNode* next; //pointer to next node 
 };
 
 //Link List of Flows
 struct FlowList{
-	struct FlowNode* head; //pointer to head node of this link list
-	int len;               //current length of this list (max: QUEUE_SIZE)
+	struct FlowNode* head;  //pointer to head node of this link list
+	int len;                                   //current length of this list (max: QUEUE_SIZE)
 };
 
 //Hash Table of Flows
 struct FlowTable{
-	struct FlowList* table; //many FlowList (HASH_RANGE)
-	int size;               //total number of nodes in this table
+	struct FlowList* table;     //many FlowList (HASH_RANGE)
+	int size;                                  //total number of nodes in this table
 };
 
 //Print a flow information
@@ -35,7 +35,7 @@ struct FlowTable{
 static void Print_Flow(struct Flow* f, int type)
 {
 	char local_ip[16]={0};           	//Local IP address 
-	char remote_ip[16]={0};		//Remote IP address 
+	char remote_ip[16]={0};		    //Remote IP address 
 	
 	snprintf(local_ip, 16, "%pI4", &(f->local_ip));
 	snprintf(remote_ip, 16, "%pI4", &(f->remote_ip));
@@ -187,7 +187,8 @@ static int Insert_List(struct FlowList* fl, struct Flow* f)
 					return 1;
 				}
 			}
-			else if(Equal(&(tmp->next->f),f)==1) //If the rule of next node is the same as our inserted flow, we just finish the insert  
+            //If the rule of next node is the same as our inserted flow, we just finish the insert  
+			else if(Equal(&(tmp->next->f),f)==1) 
 			{
 				printk(KERN_INFO "Equal Flow\n");
 				return 0;
@@ -272,7 +273,7 @@ static unsigned int Delete_List(struct FlowList* fl, struct Flow* f)
 	//No node in current FlowList
 	if(fl->len==0) 
 	{
-		printk(KERN_INFO "No node in current list\n");
+		//printk(KERN_INFO "No node in current list\n");
 		return 0;
 	}
 	else 
@@ -380,11 +381,11 @@ static void Print_Table(struct FlowTable* ft)
 	int i=0;
 	printk(KERN_INFO "Current flow table:\n");
 	for(i=0;i<HASH_RANGE;i++)
-	{
+    {
 		if(ft->table[i].len>0)
-		{
+        {
 			printk(KERN_INFO "FlowList %d\n",i);
-			Print_List(&(ft->table[i]));          
+			Print_List(&(ft->table[i]));
         }
     }
 	printk(KERN_INFO "There are %d flows in total\n",ft->size);
