@@ -12,43 +12,55 @@
 #include <net/tcp.h>
 #include <net/udp.h>
 #include <net/icmp.h>
+#include <net/checksum.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/string.h>
 #include <linux/time.h>  
+#include <linux/ktime.h>
 #include <linux/fs.h>
-#include <linux/random.h>
 #include <linux/errno.h>
 #include <linux/timer.h>
-#include <linux/vmalloc.h>
-#include <asm/uaccess.h> 
-#include <linux/hrtimer.h>
-#include <linux/ktime.h>
 
+#include "hash.h"
 #include "queue.h" 
+#include "params.h"
+#include "network_func.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("BAI Wei baiwei0427@gmail.com");
-MODULE_VERSION("1.0");
-MODULE_DESCRIPTION("Driver module of Proactive ACK Control (PAC)");
+MODULE_VERSION("1.1");
+MODULE_DESCRIPTION("Kernel module of Proactive ACK Control (PAC)");
+
+char *param_dev=NULL;
+MODULE_PARM_DESC(param_dev, "Interface to operate PAC");
+module_param(param_dev, charp, 0);
 
 //microsecond to nanosecond
 #define US_TO_NS(x)	(x * 1E3L)
 //millisecond to nanosecond
 #define MS_TO_NS(x)	(x * 1E6L)
-#define MSS 1460
+//Slow start
+#define SLOW_START 0
+//Congestion avoidance
+#define CONGESTION_AVOIDANCE 1
+
+//Global update time
+static unsigned int last_update;
+//FlowTable
+static struct FlowTable ft;
+//Global Lock (For table)
+static spinlock_t globalLock;
 
 //Delay: 1RTT 
-static unsigned long delay_in_us = 100L;//40L
-//Incoming traffic volume (bytes) in a timeslot (2RTT)
+static unsigned long delay_in_us = MIN_RTT;
+//Incoming traffic volume (bytes) in a timeslot (RTT)
 static unsigned long traffic=0;
 //Incoming traffic with Congestion Experienced in a timeslot
-static unsigned long ce=0;
-//Status: First RTT (0) Second RTT (1)
-static unsigned int status=0;
-//Tokens (in-flight traffic) 
+static unsigned long ce_traffic=0;
+//Tokens: estimation of in-flight traffic 
 static unsigned long tokens=0;
 //Bucket (maximum in-flight traffic value)
-static unsigned long bucket=60000;
+static unsigned long bucket=BUFFER_SIZE;
 
 
 //Load module into kernel
@@ -63,158 +75,26 @@ static struct nf_hook_ops nfho_outgoing;
 static struct nf_hook_ops nfho_incoming;
 ///High resolution timer
 static struct hrtimer hr_timer;
-//lock
-static spinlock_t globalLock;
 
 
-//Function to calculate microsecond-granularity TCP timestamp value
-static unsigned int get_tsval(void)
-{	
-	return (unsigned int)(ktime_to_ns(ktime_get())>>10);
-}
-
-//Function to modify microsecond-granularity TCP timestamp option back to millisecond-granularity
-//If successfully, return the value of sample RTT
-//Else, return 0
-//Note: we disable TCP window scaling 
-static unsigned int tcp_modify_incoming(struct sk_buff *skb)
-{
-	struct iphdr *ip_header=NULL;         //IP  header structure
-	struct tcphdr *tcp_header=NULL;       //TCP header structure
-	unsigned char *tcp_opt=NULL;		  //TCP option
-	unsigned int *tsecr=NULL;			  //TCP timestamp option
-	int tcplen=0;						  //Length of TCP
-	unsigned int rtt=0;					  //Sample RTT
-	
-	if (skb_linearize(skb)!= 0) 
-	{
-		return 0;
-	}
-	
-	ip_header=(struct iphdr *)skb_network_header(skb);
-	tcp_header = (struct tcphdr *)((__u32 *)ip_header+ ip_header->ihl);
-			
-	//TCP option offset=IP header pointer+IP header length+TCP header length
-	tcp_opt=(unsigned char*)ip_header+ ip_header->ihl*4+20;
-			
-	if(tcp_header->syn)
-	{
-		//In SYN packets, TCP option=MSS(4)+SACK(2)+Timestamp(10)
-		tcp_opt=tcp_opt+6;
-	}
-	else
-	{
-		//In ACK packets, TCP option=NOP(1)+NOP(1)+Timestamp(10)
-		tcp_opt=tcp_opt+2;
-	}
-			
-	//Option kind: Timestamp(8)
-	if(*tcp_opt==8)
-	{
-		//Get pointer to Timestamp echo reply (TSecr)
-		tsecr=(unsigned int*)(tcp_opt+6);
-				
-		//Calculate one RTT sample
-		rtt=get_tsval()-ntohl(*tsecr);
-		//printk(KERN_INFO "RTT sample: %u\n",rtt);
-				
-		//Modify TCP TSecr back to jiffies
-		//Don't disturb TCP. Wrong TCP timestamp echo reply may reset TCP connections
-		*tsecr=htonl(jiffies);
-	}
-	else
-	{
-		return 0;
-	}
-			
-	//TCP length=Total length - IP header length
-	tcplen=skb->len-(ip_header->ihl<<2);
-	tcp_header->check=0;
-			
-	tcp_header->check = csum_tcpudp_magic(ip_header->saddr, ip_header->daddr,
-                                  tcplen, ip_header->protocol,
-                                  csum_partial((char *)tcp_header, tcplen, 0));
-								  
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
-	
-	return rtt;
-} 
-
-//Function:
-//	i) modify millisecond-granularity TCP timestamp option to microsecond-granularity time
-// ii) modify TCP receive window (if win isn't 0)
-//If successfully, return 1 Else, return 0
-static unsigned int tcp_modify_outgoing(struct sk_buff *skb, unsigned short win)
-{
-	struct iphdr *ip_header=NULL;		//IP  header structure
-	struct tcphdr *tcp_header=NULL;     //TCP header structure
-	unsigned char *tcp_opt=NULL;	 	//TCP option
-	unsigned int *tsval=NULL;	     	//TCP timestamp option
-	int tcplen=0;                    	//Length of TCP
-	
-	if (skb_linearize(skb)!= 0) 
-	{
-		return 0;
-	}
-	
-	ip_header=(struct iphdr *)skb_network_header(skb);
-	tcp_header = (struct tcphdr *)((__u32 *)ip_header+ ip_header->ihl);
-	//TCP option offset=IP header pointer+IP header length+TCP header length
-	tcp_opt=(unsigned char*)ip_header+ ip_header->ihl*4+20;
-	
-	if(tcp_header->syn)
-	{
-		//In SYN packets, TCP option=MSS(4)+SACK(2)+Timestamp(10)
-		tcp_opt=tcp_opt+6;
-	}
-	else
-	{
-		//In ACK packets, TCP option=NOP(1)+NOP(1)+Timestamp(10)
-		tcp_opt=tcp_opt+2;
-	}
-	
-	//Option kind: Timestamp(8)
-	if(*tcp_opt==8)
-	{
-		//Get pointer to Timestamp value (TSval)
-		tsval=(unsigned int*)(tcp_opt+2);
-		//Modify TCP Timestamp value
-		*tsval=htonl(get_tsval());
-	}
-	else
-	{
-		return 0;
-	}
-	
-	//Modify TCP window if win isn't 0
-	if(win>0)
-	{
-		tcp_header->window=htons(win*MSS);
-	}
-
-	//TCP length=Total length - IP header length
-	tcplen=skb->len-(ip_header->ihl<<2);
-	tcp_header->check=0;
-			
-	tcp_header->check = csum_tcpudp_magic(ip_header->saddr, ip_header->daddr,
-											tcplen, ip_header->protocol,
-											csum_partial((char *)tcp_header, tcplen, 0));
-								  									 
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
-	
-	return 1;
-}
 
 //POSTROUTING for outgoing packets, enqueue packets
 static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff *))
 {
-	struct iphdr *ip_header;   //ip header struct
-	struct tcphdr *tcp_header; //tcp header struct
-	unsigned int dst_port;	   //Desination tcp port
-	int len;                   //len of traffic that ACK packet can trigger
-	unsigned long flags;       //variable for save current states of irq
+	struct iphdr *ip_header;        //IP header structure
+	struct tcphdr *tcp_header;  //TCP header structure
+    struct Flow f;
+	struct Info* info_pointer=NULL;
+	unsigned int trigger;               //The size of traffic that ACK packet can trigger
+	unsigned long flags;               //variable for save current states of irq
 	int result=0;
 
+    if(!out)
+        return NF_ACCEPT;
+        
+    if(strcmp(out->name,param_dev)!=0)
+        return NF_ACCEPT;
+        
 	ip_header=(struct iphdr *)skb_network_header(skb);
 
 	//The packet is not ip packet (e.g. ARP or others)
@@ -226,23 +106,48 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 	if(ip_header->protocol==IPPROTO_TCP) { //TCP packets
 		
 		tcp_header = (struct tcphdr *)((__u32 *)ip_header+ ip_header->ihl);
-		dst_port=htons((unsigned short int) tcp_header->dest);
-		//We only deal with ACK packets whose dst port is 5001 
-		if(dst_port==5001) {
+		//If this is SYN packet, a new Flow record should be inserted into Flow table
+		if(tcp_header->syn)
+		{
+            f.local_ip=ip_header->saddr;
+			f.remote_ip=ip_header->daddr;
+			f.local_port=ntohs(tcp_header->source);
+			f.remote_port=ntohs(tcp_header->dest);
+            f.i.rtt=MIN_RTT;
+            f.i.phase=SLOW_START;
+            f.i.bytes_sent_latest=0;
+            f.i.bytes_sent_total=0;
+            f.i. last_ack=ntohl(tcp_header->ack_seq);
+            f.i.last_update=get_tsval();
+            
+            spin_lock_irqsave(&globalLock,flags);
+            if(Insert_Table(&ft,&f)==0)
+				printk(KERN_INFO "Insert fails\n");
+             spin_unlock_irqrestore(&globalLock,flags);
+            trigger=MIN_PKT_LEN;
+        }
+        else
+        {
+            f.local_ip=ip_header->saddr;
+			f.remote_ip=ip_header->daddr;
+			f.local_port=ntohs(tcp_header->source);
+			f.remote_port=ntohs(tcp_header->dest);
+        }
+        
+        
+		//Modify TCP timestamp for outgoing packets
+		tcp_modify_outgoing(skb,0);
 			
-			//Modify TCP timestamp for outgoing packets
-			tcp_modify_outgoing(skb,0);
-			
-			//Request packet with payload can trigger 3MSS
-			if(tcp_header->psh)
-				len=4542;
-			else if(tcp_header->syn)
-				len=100;
-			else
-				len=1615;
-			//If there is no packet in the queue and tokens are enough
-			if(bucket-tokens>=len&&q->size==0) {
-				spin_lock_irqsave(&globalLock,flags);
+		//Request packet with payload can trigger 3MSS
+		if(tcp_header->psh)
+			len=4542;
+		else if(tcp_header->syn)
+			len=100;
+		else
+			len=1615;
+		//If there is no packet in the queue and tokens are enough
+		if(bucket-tokens>=len&&q->size==0) {
+			spin_lock_irqsave(&globalLock,flags);
 				//Increase in-flight traffic value
 				tokens+=len;
 				spin_unlock_irqrestore(&globalLock,flags);
@@ -331,7 +236,9 @@ static enum hrtimer_restart my_hrtimer_callback( struct hrtimer *timer )
 		//Reset in-flight traffic based on incoming traffic and ECN
 		if(traffic<20000&&traffic>0&&2*traffic>ce)
 		{
-			tokens=bucket*1/2*traffic/25000*2*traffic/(2*traffic-ce);
+			tokens=bucket*traffic/25000*2*traffic/(2*traffic-ce);
+			if(tokens>bucket)
+				tokens=bucket;
 		}
 		
 		if(traffic==0)
@@ -389,7 +296,7 @@ int init_module(void)
 	//Initialize in-flight traffic as zero
 	tokens=0;
 	//Initialize max in-flight traffic
-	bucket=70000;
+	bucket=80000;
 	//Initialize clock
 	spin_lock_init(&globalLock);
 

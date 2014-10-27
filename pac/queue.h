@@ -6,10 +6,9 @@
 #define QUEUE_SIZE 2048
 
 struct Packet{
-
     int (*okfn)(struct sk_buff *); //function pointer to reinject packets
-    struct sk_buff *skb;           //socket buffer pointer to packet   
-	//int size;					   //The size of traffic that this ACK packet can trigger
+    struct sk_buff *skb;                 //socket buffer pointer to packet   
+    unsigned int trigger;               //The size of traffic that this ACK packet can trigger
 }; 
 
 struct PacketQueue{
@@ -32,7 +31,7 @@ static void Free_PacketQueue(struct PacketQueue* q)
 	vfree(q->packets);
 }
 
-static int Enqueue_PacketQueue(struct PacketQueue* q,struct sk_buff *skb,int (*okfn)(struct sk_buff *))
+static int Enqueue_PacketQueue(struct PacketQueue* q,struct sk_buff *skb,int (*okfn)(struct sk_buff *), unsigned int trigger)
 {
 	//There is capacity to contain new packets
 	if(q->size<QUEUE_SIZE) {
@@ -41,12 +40,12 @@ static int Enqueue_PacketQueue(struct PacketQueue* q,struct sk_buff *skb,int (*o
 		int queueIndex=(q->head+q->size)%QUEUE_SIZE;
 		q->packets[queueIndex].skb=skb;
 		q->packets[queueIndex].okfn=okfn;
+        q->packets[queueIndex].trigger=trigger;
 		q->size++;
 		q->bytes+=skb->len;
 		return 1;
 
 	} else {
-
 		return 0;
 	}
 }
@@ -61,12 +60,9 @@ static int Dequeue_PacketQueue(struct PacketQueue* q)
 		//Reinject head packet of current queue
 		q->head=(q->head+1)%QUEUE_SIZE;
 		return 1;
-
 	} else {
-	
 		return 0;
 	}
-
 }
 
 #endif
