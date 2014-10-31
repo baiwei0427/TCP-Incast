@@ -6,29 +6,31 @@
 //phase: TCP phase Slow Start (0) or Congestion Avoidance (1)
 //bytes_sent_latest: The (incoming) bytes sent by this flow in the latest interval
 //bytes_sent_total: The (incoming) bytes sent by this flow in total 
-//last_ack: The latest ACK sequence number of this flow
+//last_ack: The latest ACK number of this flow
+//last_seq: The latest sequence number of this flow
+//dup_ack: The number of duplicate ACKs of this flow
 //last_update: The last update time (unit: us)
-
-struct Info{
-
+struct Info
+{
 	unsigned int srtt;
 	unsigned short int phase;
 	unsigned long bytes_sent_latest;
     unsigned long bytes_sent_total;
     unsigned int last_ack;
+    unsigned int last_seq;
+    //unsigned short int dup_ack;
 	unsigned int last_update;
 };
 
 //Define structure of a TCP flow
 //Flow is defined by 4-tuple <local_ip,remote_ip,local_port,remote_port> and its related information
-struct Flow{
-
+struct Flow
+{
 	unsigned int local_ip;                      //Local IP address
 	unsigned int remote_ip;				    //Remote IP address
 	unsigned short int local_port;		//Local TCP port
 	unsigned short int remote_port;	//Remote TCP port
 	struct Info i;											//Information for this flow
-	
 };
 
 #endif

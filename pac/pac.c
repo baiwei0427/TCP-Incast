@@ -31,7 +31,7 @@ MODULE_AUTHOR("BAI Wei baiwei0427@gmail.com");
 MODULE_VERSION("1.1");
 MODULE_DESCRIPTION("Kernel module of Proactive ACK Control (PAC)");
 
-char *param_dev=NULL;
+static char *param_dev=NULL;
 MODULE_PARM_DESC(param_dev, "Interface to operate PAC");
 module_param(param_dev, charp, 0);
 
@@ -44,24 +44,34 @@ module_param(param_dev, charp, 0);
 //Congestion avoidance
 #define CONGESTION_AVOIDANCE 1
 
-//Global update time
-static unsigned int last_update;
 //FlowTable
 static struct FlowTable ft;
-//Global Lock (For table)
+//Lock for flow table 
+static spinlock_t tableLock;
+//Lock for queue
+//static spinlock_t queueLock;
+//Lock for other global information (e.g. queue)
 static spinlock_t globalLock;
 
-//Delay: 1RTT 
-static unsigned long delay_in_us = MIN_RTT;
+//Global update time
+static unsigned int last_update;
+//Total value of all RTT samples (us)
+static unsigned long total_rtt;
+//Sample RTT numbers
+static unsigned long samples;
+//Average RTT (us)
+static unsigned long avg_rtt;
+//Average throughput (Mbps)
+static unsigned int avg_throughput;
+
 //Incoming traffic volume (bytes) in a timeslot (RTT)
 static unsigned long traffic=0;
-//Incoming traffic with Congestion Experienced in a timeslot
-static unsigned long ce_traffic=0;
+//Incoming traffic with ECN marking (Congestion Experienced) in a timeslot (RTT)
+static unsigned long ecn_traffic=0;
 //Tokens: estimation of in-flight traffic 
 static unsigned long tokens=0;
-//Bucket (maximum in-flight traffic value)
-static unsigned long bucket=BUFFER_SIZE;
-
+//Threshold for in-flight traffic
+static unsigned long bucket=0;
 
 //Load module into kernel
 int init_module(void);
@@ -69,31 +79,35 @@ int init_module(void);
 void cleanup_module(void);
 //PacketQueue pointer
 static struct PacketQueue *q=NULL;
-//Outgoing packets POSTROUTING
+//Hook for outgoing packets at POSTROUTING
 static struct nf_hook_ops nfho_outgoing;
-//Incoming packets PREROUTING
+//Hook for incoming packets at PREROUTING
 static struct nf_hook_ops nfho_incoming;
 ///High resolution timer
 static struct hrtimer hr_timer;
 
 
-
 //POSTROUTING for outgoing packets, enqueue packets
 static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff *))
 {
-	struct iphdr *ip_header;        //IP header structure
+	struct iphdr *ip_header;       //IP header structure
 	struct tcphdr *tcp_header;  //TCP header structure
     struct Flow f;
 	struct Info* info_pointer=NULL;
-	unsigned int trigger;               //The size of traffic that ACK packet can trigger
+	unsigned int trigger=0;          //The volume of traffic that ACK packet can trigger
 	unsigned long flags;               //variable for save current states of irq
+    unsigned int ack;                    //The ack number of this packet 
 	int result=0;
 
     if(!out)
+    {
         return NF_ACCEPT;
+    }
         
     if(strcmp(out->name,param_dev)!=0)
+    {
         return NF_ACCEPT;
+    }
         
 	ip_header=(struct iphdr *)skb_network_header(skb);
 
@@ -103,8 +117,8 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 		return NF_ACCEPT;
 	}
 
-	if(ip_header->protocol==IPPROTO_TCP) { //TCP packets
-		
+	if(ip_header->protocol==IPPROTO_TCP) //TCP packets
+    {	
 		tcp_header = (struct tcphdr *)((__u32 *)ip_header+ ip_header->ihl);
 		//If this is SYN packet, a new Flow record should be inserted into Flow table
 		if(tcp_header->syn)
@@ -113,17 +127,20 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 			f.remote_ip=ip_header->daddr;
 			f.local_port=ntohs(tcp_header->source);
 			f.remote_port=ntohs(tcp_header->dest);
-            f.i.rtt=MIN_RTT;
+            f.i.srtt=MIN_RTT;
             f.i.phase=SLOW_START;
             f.i.bytes_sent_latest=0;
             f.i.bytes_sent_total=0;
-            f.i. last_ack=ntohl(tcp_header->ack_seq);
+            f.i.last_ack=ntohl(tcp_header->ack_seq);
+            f.i.last_seq=0;
             f.i.last_update=get_tsval();
             
-            spin_lock_irqsave(&globalLock,flags);
+            spin_lock_irqsave(&tableLock,flags);
             if(Insert_Table(&ft,&f)==0)
-				printk(KERN_INFO "Insert fails\n");
-             spin_unlock_irqrestore(&globalLock,flags);
+			{
+                printk(KERN_INFO "Insert fails\n");
+            }
+            spin_unlock_irqrestore(&tableLock,flags);
             trigger=MIN_PKT_LEN;
         }
         else
@@ -132,43 +149,103 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 			f.remote_ip=ip_header->daddr;
 			f.local_port=ntohs(tcp_header->source);
 			f.remote_port=ntohs(tcp_header->dest);
+            ack=ntohl(tcp_header->ack_seq);
+            Init_Info(&(f.i));
+            
+            info_pointer=Search_Table(&ft,&f);
+            //Update per-flow information now
+            if(info_pointer!=NULL)
+            {
+                //If this packet is the first ACK packet since last_ack==0
+                if(info_pointer->last_ack==0)
+                {
+                    spin_lock_irqsave(&tableLock,flags);
+                    info_pointer->last_ack=ack;
+                    spin_unlock_irqrestore(&tableLock,flags);
+                    if(tcp_header->psh)
+                    {
+                        trigger=MIN_WIN*(MSS+54);
+                    }
+                    else
+                    {
+                        trigger=MIN_PKT_LEN;
+                    }
+                }
+                else 
+                {
+                    spin_lock_irqsave(&tableLock,flags);
+                    //If the packet is ECE, this TCP flow goes into congestion avoidance
+                    if(tcp_header->ece)
+                    {
+                        info_pointer->phase=CONGESTION_AVOIDANCE;
+                    }   
+                    //If the ACK number of current packet is larger than the latest ACK number of this flow
+                    if(is_larger(ack,info_pointer->last_ack)==1)
+                    {
+                        //The volume of data cumulatively acknowledged by this ACK packet
+                        trigger=cumulative_ack(ack,info_pointer->last_ack);
+                        info_pointer->last_ack=ack;
+                    }
+                    spin_unlock_irqrestore(&tableLock,flags);
+                    
+                    //Calculate the volume of data triggered by this ACK packet
+                    if(trigger>0)
+                    {
+                         //Slow start: trigger=ack2-ack1+MSS
+                        if(info_pointer->phase==SLOW_START)
+                        {
+                            trigger=(trigger+MSS)*(MSS+54)/MSS;
+                        }
+                        //ECE 
+                        else if(tcp_header->ece)
+                        {
+                            trigger=trigger*(MSS+54)/MSS;
+                        }
+                        //Congestion avoidance: trigger=ack2-ack1+MSS*MSS/Window
+                        else
+                        {
+                            trigger=(trigger+MSS*MSS/MIN_WIN)*(MSS+54)/MSS;
+                        }
+                    }
+                    //The first request packet
+                    else if(tcp_header->psh)
+                    {
+                        trigger=MIN_WIN*(MSS+54);
+                    }
+                    else 
+                    {
+                        trigger=MIN_PKT_LEN;
+                    }
+                }
+            }
         }
-        
-        
+    
 		//Modify TCP timestamp for outgoing packets
-		tcp_modify_outgoing(skb,0);
+		tcp_modify_outgoing(skb,0,get_tsval());
 			
-		//Request packet with payload can trigger 3MSS
-		if(tcp_header->psh)
-			len=4542;
-		else if(tcp_header->syn)
-			len=100;
-		else
-			len=1615;
 		//If there is no packet in the queue and tokens are enough
-		if(bucket-tokens>=len&&q->size==0) {
+		if(bucket-tokens>=trigger&&q->size==0) 
+        {
 			spin_lock_irqsave(&globalLock,flags);
-				//Increase in-flight traffic value
-				tokens+=len;
-				spin_unlock_irqrestore(&globalLock,flags);
-				//spin_unlock_irq(&globalLock);
-				//spin_unlock(&globalLock);
-				return NF_ACCEPT;
-			}
-			
-			//Else, we need to enqueue this packet
-			spin_lock_irqsave(&globalLock,flags);
-			result=Enqueue_PacketQueue(q,skb,okfn);
+			//Increase in-flight traffic value
+			tokens+=trigger;
 			spin_unlock_irqrestore(&globalLock,flags);
+			return NF_ACCEPT;
+		}
+		//Else, we need to enqueue this packet
+		spin_lock_irqsave(&globalLock,flags);
+		result=Enqueue_PacketQueue(q,skb,okfn,trigger);
+		spin_unlock_irqrestore(&globalLock,flags);
 
-			if(result==1) { //Enqueue successfully
-				//printk(KERN_INFO "Enqueue a packet\n");
-				return NF_STOLEN;
-
-			} else {        //No enough space in queue
-				printk(KERN_INFO "No enough space in queue\n");
-				return NF_DROP;
-			}
+		if(result==1)//Enqueue successfully 
+        { 
+			//printk(KERN_INFO "Enqueue a packet\n");
+			return NF_STOLEN;
+        } 
+        else//No enough space in queue 
+        {       
+			printk(KERN_INFO "No enough space in queue\n");
+			return NF_DROP;
 		}
 	}
 	return NF_ACCEPT;
@@ -177,12 +254,25 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
 //PREROUTING for incoming packets
 static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, const struct net_device *in, const struct net_device *out, int (*okfn)(struct sk_buff *))
 {
-	struct iphdr *ip_header;   //ip header struct
-	struct tcphdr *tcp_header; //tcp header struct
-	unsigned int src_port;	   //source TCP port
-	unsigned long flags;       //variable for save current states of irq
-	unsigned int rtt;		   //Sample RTT value
-	
+	struct iphdr *ip_header;             //IP header structure
+	struct tcphdr *tcp_header;        //TCP header structure
+    struct Flow f;
+	struct Info* info_pointer=NULL;
+	unsigned long flags;                     //variable for save current states of irq
+	unsigned int rtt=0;		                //Sample RTT value
+    unsigned int time=0;       //Time interval to measure throughput
+    unsigned int throughput=0; 	//Incoming throughput in the latest slot
+	    
+    if(!in)
+    {
+        return NF_ACCEPT;
+    }
+    
+    if(strcmp(in->name,param_dev)!=0)
+    {
+        return NF_ACCEPT;
+    }    
+        
 	ip_header=(struct iphdr *)skb_network_header(skb);
 	
 	//The packet is not ip packet (e.g. ARP or others)
@@ -191,31 +281,82 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 		return NF_ACCEPT;
 	}
 	
-	if(ip_header->protocol==IPPROTO_TCP) { //TCP packets
-	
-		tcp_header = (struct tcphdr *)((__u32 *)ip_header+ ip_header->ihl);
-		src_port=htons((unsigned short int) tcp_header->source);
-		
-		if(src_port==5001)
+    //TCP packets
+	if(ip_header->protocol==IPPROTO_TCP)   
+    {
+        tcp_header = (struct tcphdr *)((__u32 *)ip_header+ ip_header->ihl);
+        //Note that: source and destination should be changed !!!
+        f.local_ip=ip_header->daddr;
+        f.remote_ip=ip_header->saddr;
+        f.local_port=ntohs(tcp_header->dest);
+        f.remote_port=ntohs(tcp_header->source);
+        Init_Info(&(f.i));
+        //Delete flow entry when we observe FIN or RST packets 
+        if(tcp_header->fin||tcp_header->rst)
+        {
+            spin_lock_irqsave(&tableLock,flags);
+			if(Delete_Table(&ft,&f)==0)
+            {
+                printk(KERN_INFO "Delete fails\n");
+            }
+            spin_unlock_irqrestore(&tableLock,flags);
+        }
+        else
+        {
+            //Get reverse RTT
+            rtt=tcp_modify_incoming(skb);
+            //printk(KERN_INFO "%u\n", rtt);
+            //Search flow information in the table
+            info_pointer=Search_Table(&ft,&f);
+            //Update per-flow information
+            if(info_pointer!=NULL&&rtt!=0)
+            {
+                spin_lock_irqsave(&tableLock,flags);
+                //Update smooth RTT
+                info_pointer->srtt=RTT_SMOOTH*info_pointer->srtt/1000+(1000-RTT_SMOOTH)*rtt/1000;
+                spin_unlock_irqrestore(&tableLock,flags);    
+            }
+        }
+        spin_lock_irqsave(&globalLock,flags);
+        time=get_tsval()-last_update;
+        if(time>avg_rtt)
+        {
+            last_update=get_tsval();
+            //Correct in-flight traffic overestimation
+            //Calculate incoming throughput (bps)
+            throughput=traffic*8*1024*1024/time;
+            if(throughput<ALPHA*1024*1024&&2*traffic>ecn_traffic)//*avg_throughput/1000&&2*traffic>ecn_traffic)
+            {
+                tokens=min(tokens,bucket*throughput/avg_throughput*2*traffic/(2*traffic-ecn_traffic));
+            }
+            //Reset global information
+            //avg_throughput=THROUGHPUT_SMOOTH*avg_throughput/1000+(1000-THROUGHPUT_SMOOTH)*throughput/1000;
+            traffic=0;
+            ecn_traffic=0;
+            total_rtt=0;
+            samples=0;
+        //spin_unlock_irqrestore(&globalLock,flags);   
+        }
+        //Incoming traffic in this timeslot
+		traffic+=skb->len;
+		//ECN marking traffic
+		if(ip_header->tos==0x03)
 		{
-			//Get reverse RTT
-			rtt=tcp_modify_incoming(skb);
-			//printk(KERN_INFO "%u\n", rtt);
-			//Incoming traffic in this timeslot
-			traffic+=skb->len;
-			//CE bit=11
-			if(ip_header->tos==0x03&&skb->len>100)
-			{
-				//Congestion Experienced traffic in this timeslot
-				ce+=skb->len;
-			}
-			//Reduce in-flight traffic value 
-			spin_lock_irqsave(&globalLock,flags);
-			tokens-=skb->len;
-			spin_unlock_irqrestore(&globalLock,flags);
+			//Congestion Experienced traffic in this timeslot
+			ecn_traffic+=skb->len;
 		}
-	}
-	
+        if(tokens>=skb->len)
+        {
+            tokens-=skb->len;
+        }
+        else
+        {
+            tokens=0;
+        }
+        total_rtt+=rtt;
+        samples++;
+        spin_unlock_irqrestore(&globalLock,flags);   
+    }	
 	return NF_ACCEPT;
 }
 
@@ -225,63 +366,32 @@ static enum hrtimer_restart my_hrtimer_callback( struct hrtimer *timer )
 	ktime_t interval,now;  
 	unsigned long flags;         //variable for save current states of irq
 	unsigned int len;
-	
-	if(status==0)
-	{
-		status=1;
-	}
-	else
-	{
-		status=0;
-		//Reset in-flight traffic based on incoming traffic and ECN
-		if(traffic<20000&&traffic>0&&2*traffic>ce)
-		{
-			tokens=bucket*traffic/25000*2*traffic/(2*traffic-ce);
-			if(tokens>bucket)
-				tokens=bucket;
-		}
-		
-		if(traffic==0)
-		{
-			tokens=0;
-		}
-		//if(traffic>1000)
-		//{
-		//	printk(KERN_INFO "Reset in-flight traffic to %lu\n", tokens);
-		//}
-		traffic=0;
-		ce=0;
-	}
+        
 	while(1)
 	{
-
-		if(q->size>0) { //There are still some packets in queue 
-			
-			if(q->packets[q->head].skb->len>60) //SYN packets
-				len=100;
-			else if(q->packets[q->head].skb->len>52) //Request packets
-				len=4542;
-			else //Normal ACK packets
-				len=1615;
-				
-			if(bucket-tokens>=len) { //There is still enough space 
-			
+		if(q->size>0) //There are still some packets in queue 	
+        { 			
+            len=q->packets[q->head].trigger;
+			if(bucket-tokens>=len)  
+            { 
 				spin_lock_irqsave(&globalLock,flags);
-				//Increase in-flight traffic value
+                //Increase in-flight traffic value
 				tokens+=len;
-				//Dequeue packets
-				Dequeue_PacketQueue(q);
-				spin_unlock_irqrestore(&globalLock,flags);
-				
-			} else { //There is no enough space
+                //Dequeue packets
+                Dequeue_PacketQueue(q);
+                spin_unlock_irqrestore(&globalLock,flags);
+			} 
+            else 
+            { 
 				break;
 			}
-		} else { 
+		} 
+        else 
+        { 
 			break;
 		}
 	}
-
-	interval = ktime_set(0, US_TO_NS(delay_in_us));
+	interval = ktime_set(0, US_TO_NS(DELAY_IN_US));
 	now = ktime_get();
 	hrtimer_forward(timer,now,interval);
 	return HRTIMER_RESTART;
@@ -289,22 +399,51 @@ static enum hrtimer_restart my_hrtimer_callback( struct hrtimer *timer )
 
 int init_module(void) 
 {
-
+    int i=0;
+     //Get interface
+    if(param_dev==NULL) 
+    {
+        printk(KERN_INFO "PAC: not specify network interface (eth1 by default). \n");
+        param_dev = "eth1\0";
+	}
+    // trim 
+	for(i = 0; i < 32 && param_dev[i] != '\0'; i++) 
+    {
+		if(param_dev[i] == '\n') 
+        {
+			param_dev[i] = '\0';
+			break;
+		}
+	}
+    
 	ktime_t ktime;
-	//Initialize status
-	status=0;
 	//Initialize in-flight traffic as zero
 	tokens=0;
 	//Initialize max in-flight traffic
-	bucket=80000;
-	//Initialize clock
-	spin_lock_init(&globalLock);
+	bucket=BUFFER_SIZE;
+	//Initialize clock for table
+	spin_lock_init(&tableLock);
+    //Initialize clock for queue
+    //spin_lock_init(&queueLock);
+    //Initialize clock for global information
+    spin_lock_init(&globalLock);
 
-	//Init PacketQueue
+    //Get current time as the latest update time 
+	last_update=get_tsval();	
+    total_rtt=0;					
+	samples=0;						
+	avg_rtt=MIN_RTT;	
+    avg_throughput=1000*1024*1024;
+    
+	//Initialize PacketQueue
 	q=vmalloc(sizeof(struct PacketQueue));
 	Init_PacketQueue(q);
-
-	ktime = ktime_set( 0, US_TO_NS(delay_in_us) );
+    
+    //Initialize FlowTable
+	Init_Table(&ft);
+    
+    //Init Timer
+	ktime = ktime_set( 0, US_TO_NS(DELAY_IN_US) );
 	hrtimer_init( &hr_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL );
 	hr_timer.function = &my_hrtimer_callback;
 	hrtimer_start( &hr_timer, ktime, HRTIMER_MODE_REL );
@@ -332,13 +471,17 @@ void cleanup_module(void)
 	int ret;
 
 	ret = hrtimer_cancel( &hr_timer );
-	if (ret) {
+	if (ret)
+    {
 		printk("The timer was still in use...\n");
 	} 
 
 	nf_unregister_hook(&nfho_outgoing);
 	nf_unregister_hook(&nfho_incoming);
 	Free_PacketQueue(q);
+    //Clear flow table
+	//Print_Table(&ft);
+	Empty_Table(&ft);
 	printk(KERN_INFO "Uninstall PAC kernel module\n");
 	
 }

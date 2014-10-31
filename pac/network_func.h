@@ -134,9 +134,11 @@ static unsigned int tcp_modify_outgoing(struct sk_buff *skb, unsigned int win, u
 		return 0;
 	}
 	
-	//Modify TCP window. Note that TCP received window should be smaller than 65536 bytes and .larger than 0 bytes
+	//Modify TCP window. Note that TCP received window should be smaller than 65536 bytes and larger than 0 bytes
     if(win<65536&&win>0)
+    {
         tcp_header->window=htons(win);
+    }
 
 	//TCP option offset=IP header pointer+IP header length+TCP header length
 	tcp_opt=(unsigned char*)ip_header+ ip_header->ihl*4+20;
@@ -194,5 +196,40 @@ static unsigned int tcp_modify_outgoing(struct sk_buff *skb, unsigned int win, u
 	return 1;
 }
 
+//Maximum 32-bit integer value: 4294967295
+//Function: determine whether seq1 is larger than seq2
+//If Yes, return 1. Else, return 0.
+static unsigned short int is_larger(unsigned int seq1, unsigned int seq2)
+{
+    if(seq1>seq2)
+        return 1;
+    //A simple heuristic to handle wrapped TCP sequence number 
+     else if(seq1<seq2-4294900000)
+        return 1;
+     else
+        return 0;
+}
+
+//Function: determine whether seq1 is smaller than seq2
+//If Yes, return 1. Else, return 0.
+static unsigned short int is_smaller(unsigned int seq1,unsigned seq2)
+{
+    //larger
+    if(is_larger(seq1,seq2)==1)
+        return 0;
+    //equal
+    else if(seq1==seq2)
+        return 0;
+    else
+        return 1;
+}
+
+static unsigned int cumulative_ack(unsigned int seq1, unsigned int seq2)
+{
+    if(seq1>=seq2)
+        return seq1-seq2;
+    else
+        return 4294967295-(seq2-seq1); 
+}
 
 #endif

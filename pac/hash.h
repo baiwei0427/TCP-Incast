@@ -8,7 +8,7 @@
 
 #include "flow.h"
 
-#define HASH_RANGE 256	//The table has HASH_RANGE link lists
+#define HASH_RANGE 512	//The table has HASH_RANGE link lists
 #define QUEUE_SIZE 32		    //Each link list contains QUEUE_SIZE nodes at most 
 
 
@@ -58,7 +58,7 @@ static void Print_Flow(struct Flow* f, int type)
 static unsigned int Hash(struct Flow* f)
 {
 	//return a value in [0,HASH_RANGE-1]
-	return ((f->local_ip/(256*256*256)+1)*(f->remote_ip/(256*256*256)+1)*(f->local_port+1)*(f->remote_port+1))%HASH_RANGE;
+	return ((f->local_ip%HASH_RANGE+1)*(f->remote_ip%HASH_RANGE+1)*(f->local_port%HASH_RANGE+1)*(f->remote_port%HASH_RANGE+1))%HASH_RANGE;
 }
 
 //Determine whether two Flows are equal 
@@ -79,6 +79,8 @@ static void Init_Info(struct Info* i)
 	i->bytes_sent_latest=0;
     i->bytes_sent_total=0;
 	i->last_ack=0;
+    i->last_seq=0;
+    //i->dup_ack=0;
 	i->last_update=0;
 }
 
@@ -208,7 +210,7 @@ static int Insert_Table(struct FlowTable* ft,struct Flow* f)
 	int result=0;
 	unsigned int index=Hash(f);
 	
-	//printk(KERN_INFO "Insert to link list %d\n",index);
+	printk(KERN_INFO "Insert to link list %u\n",index);
 	//Insert Flow to appropriate FlowList based on Hash value
 	result=Insert_List(&(ft->table[index]),f);
 	//Increase the size of FlowTable
@@ -263,12 +265,10 @@ static struct Info* Search_Table(struct FlowTable* ft, struct Flow* f)
 }
 
 //Delete a Flow from FlowList
-//If the Flow is deleted successfully, return rwnd of this flow (>0)
+//If the Flow is deleted successfully, return 1
 //Else, return 0
 static unsigned int Delete_List(struct FlowList* fl, struct Flow* f)
-{
-	unsigned int result=0;
-	
+{	
 	//No node in current FlowList
 	if(fl->len==0) 
 	{
@@ -288,20 +288,16 @@ static unsigned int Delete_List(struct FlowList* fl, struct Flow* f)
 				return 0;
 			}
 			else if(Equal(&(tmp->next->f),f)==1) //Find the matching rule (matching FlowNode is tmp->next rather than tmp), delete rule and return 1
-			{
-				//Get rwnd 
-				result=tmp->next->f.i.rwnd;
-				
+			{				
 				 s=tmp->next;
-				//Print_Flow(&(tmp->next->f),2);
-				
+				//Print_Flow(&(tmp->next->f),2);	
 				tmp->next=s->next;
 				//Delete matching FlowNode from this FlowList
 				kfree(s);
 				//Reduce the length of this FlowList by one
 				fl->len--;
 				//printk(KERN_INFO "Delete a flow record\n");
-				return result;
+				return 1;
 			}
 			else //Unmatch
 			{
@@ -314,7 +310,7 @@ static unsigned int Delete_List(struct FlowList* fl, struct Flow* f)
 }
 
 //Delete a Flow from FlowTable
-//If success, return rwnd (>0) of this entry. Else, return 0
+//If success, return 1. Else, return 0
 static unsigned int Delete_Table(struct FlowTable* ft,struct Flow* f)
 {
 	unsigned int result=0;
