@@ -8,7 +8,6 @@
 //bytes_sent_total: The (incoming) bytes sent by this flow in total 
 //last_ack: The latest ACK number of this flow
 //last_seq: The latest sequence number of this flow
-//dup_ack: The number of duplicate ACKs of this flow
 //last_update: The last update time (unit: us)
 struct Info
 {

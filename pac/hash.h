@@ -8,7 +8,7 @@
 
 #include "flow.h"
 
-#define HASH_RANGE 512	//The table has HASH_RANGE link lists
+#define HASH_RANGE 256	//The table has HASH_RANGE link lists
 #define QUEUE_SIZE 32		    //Each link list contains QUEUE_SIZE nodes at most 
 
 
@@ -21,17 +21,17 @@ struct FlowNode{
 //Link List of Flows
 struct FlowList{
 	struct FlowNode* head;  //pointer to head node of this link list
-	int len;                                   //current length of this list (max: QUEUE_SIZE)
+	unsigned int len;                //current length of this list (max: QUEUE_SIZE)
 };
 
 //Hash Table of Flows
 struct FlowTable{
 	struct FlowList* table;     //many FlowList (HASH_RANGE)
-	int size;                                  //total number of nodes in this table
+	unsigned int size;              //total number of nodes in this table
 };
 
 //Print a flow information
-//Type: Add(0) Delete(1)
+//Type: Add(0) Delete(1) and Others
 static void Print_Flow(struct Flow* f, int type)
 {
 	char local_ip[16]={0};           	//Local IP address 
@@ -65,10 +65,14 @@ static unsigned int Hash(struct Flow* f)
 //<local_ip, remote_ip, local_port, remote_port> determines a flow
 static int Equal(struct Flow* f1,struct Flow* f2)
 {
-	return ((f1->local_ip==f2->local_ip)
-	&&(f1->remote_ip==f2->remote_ip)
-	&&(f1->local_port==f2->local_port)
-	&&(f1->remote_port==f2->remote_port));		
+	if((f1->local_ip==f2->local_ip)&&(f1->remote_ip==f2->remote_ip)&&(f1->local_port==f2->local_port)&&(f1->remote_port==f2->remote_port))
+    {
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 //Initialize a Info structure

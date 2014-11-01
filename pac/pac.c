@@ -218,17 +218,22 @@ static unsigned int hook_func_out(unsigned int hooknum, struct sk_buff *skb, con
                     }
                 }
             }
+            else
+            {
+                printk(KERN_INFO "Search fails\n");
+            }
         }
-    
+        printk(KERN_INFO "The trigger is %u\n",trigger);
 		//Modify TCP timestamp for outgoing packets
 		tcp_modify_outgoing(skb,0,get_tsval());
 			
 		//If there is no packet in the queue and tokens are enough
 		if(bucket-tokens>=trigger&&q->size==0) 
         {
+            //Increase in-flight traffic value
 			spin_lock_irqsave(&globalLock,flags);
-			//Increase in-flight traffic value
 			tokens+=trigger;
+            printk(KERN_INFO "Current in-flight traffic is %lu\n",tokens);
 			spin_unlock_irqrestore(&globalLock,flags);
 			return NF_ACCEPT;
 		}
@@ -260,8 +265,6 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
 	struct Info* info_pointer=NULL;
 	unsigned long flags;                     //variable for save current states of irq
 	unsigned int rtt=0;		                //Sample RTT value
-    unsigned int time=0;       //Time interval to measure throughput
-    unsigned int throughput=0; 	//Incoming throughput in the latest slot
 	    
     if(!in)
     {
@@ -318,25 +321,6 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
             }
         }
         spin_lock_irqsave(&globalLock,flags);
-        time=get_tsval()-last_update;
-        if(time>avg_rtt)
-        {
-            last_update=get_tsval();
-            //Correct in-flight traffic overestimation
-            //Calculate incoming throughput (bps)
-            throughput=traffic*8*1024*1024/time;
-            if(throughput<ALPHA*1024*1024&&2*traffic>ecn_traffic)//*avg_throughput/1000&&2*traffic>ecn_traffic)
-            {
-                tokens=min(tokens,bucket*throughput/avg_throughput*2*traffic/(2*traffic-ecn_traffic));
-            }
-            //Reset global information
-            //avg_throughput=THROUGHPUT_SMOOTH*avg_throughput/1000+(1000-THROUGHPUT_SMOOTH)*throughput/1000;
-            traffic=0;
-            ecn_traffic=0;
-            total_rtt=0;
-            samples=0;
-        //spin_unlock_irqrestore(&globalLock,flags);   
-        }
         //Incoming traffic in this timeslot
 		traffic+=skb->len;
 		//ECN marking traffic
@@ -353,6 +337,8 @@ static unsigned int hook_func_in(unsigned int hooknum, struct sk_buff *skb, cons
         {
             tokens=0;
         }
+        if(tokens>0)
+            printk(KERN_INFO "Current in-flight traffic is %lu\n",tokens);
         total_rtt+=rtt;
         samples++;
         spin_unlock_irqrestore(&globalLock,flags);   
@@ -366,7 +352,41 @@ static enum hrtimer_restart my_hrtimer_callback( struct hrtimer *timer )
 	ktime_t interval,now;  
 	unsigned long flags;         //variable for save current states of irq
 	unsigned int len;
-        
+    unsigned int time=0;       //Time interval to measure throughput
+    unsigned long int throughput=0; 	//Incoming throughput in the latest slot
+    
+
+    time=get_tsval()-last_update;
+    if(time>avg_rtt)
+    {
+        last_update=get_tsval();
+        //Correct in-flight traffic overestimation
+        //Calculate incoming throughput (bps)
+        throughput=traffic*8*1024*1024/time;
+        spin_lock_irqsave(&globalLock,flags);    
+        if(throughput<ALPHA*1024*1024&&2*traffic>ecn_traffic)//*avg_throughput/1000&&2*traffic>ecn_traffic)
+        {
+            tokens=min(tokens,bucket*throughput/avg_throughput*2*traffic/(2*traffic-ecn_traffic));
+            if(tokens>0)
+                printk(KERN_INFO "Current throughput is %lu Mbps, we reset in-flight traffic to %lu\n",throughput/(1024*1024),tokens);
+        }
+        //Reset global information
+        if(samples>0)
+        {
+            avg_rtt=min(max(MIN_RTT,total_rtt/samples),MAX_RTT);
+        }
+        else
+        {
+            avg_rtt=MIN_RTT;
+        }
+        //avg_throughput=THROUGHPUT_SMOOTH*avg_throughput/1000+(1000-THROUGHPUT_SMOOTH)*throughput/1000;
+        traffic=0;
+        ecn_traffic=0;
+        total_rtt=0;
+        samples=0;
+        spin_unlock_irqrestore(&globalLock,flags);  
+    }
+            
 	while(1)
 	{
 		if(q->size>0) //There are still some packets in queue 	
@@ -379,6 +399,7 @@ static enum hrtimer_restart my_hrtimer_callback( struct hrtimer *timer )
 				tokens+=len;
                 //Dequeue packets
                 Dequeue_PacketQueue(q);
+                printk(KERN_INFO "Current in-flight traffic is %lu\n",tokens);
                 spin_unlock_irqrestore(&globalLock,flags);
 			} 
             else 
@@ -417,10 +438,10 @@ int init_module(void)
 	}
     
 	ktime_t ktime;
-	//Initialize in-flight traffic as zero
-	tokens=0;
 	//Initialize max in-flight traffic
 	bucket=BUFFER_SIZE;
+    //Initialize in-flight traffic as zero
+	tokens=0;
 	//Initialize clock for table
 	spin_lock_init(&tableLock);
     //Initialize clock for queue

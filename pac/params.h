@@ -11,6 +11,8 @@ static unsigned int MIN_WIN=3;
 static unsigned long DELAY_IN_US=100L;
 //Base RTT: 200 us
 static unsigned int MIN_RTT=200;
+//Maximum RTT: 1ms
+static unsigned int MAX_RTT=1000;
 //Switch buffer size. By default, it is 80KB (4MB/48 ports) in our testbed
 static unsigned int BUFFER_SIZE=80*1024;
 //Minimal TCP packet length (Ethernet header 14+IP header 20+TCP header 20+TCP option 20=74)
