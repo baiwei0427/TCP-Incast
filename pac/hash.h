@@ -214,7 +214,7 @@ static int Insert_Table(struct FlowTable* ft,struct Flow* f)
 	int result=0;
 	unsigned int index=Hash(f);
 	
-	printk(KERN_INFO "Insert to link list %u\n",index);
+	//printk(KERN_INFO "Insert to link list %u\n",index);
 	//Insert Flow to appropriate FlowList based on Hash value
 	result=Insert_List(&(ft->table[index]),f);
 	//Increase the size of FlowTable
