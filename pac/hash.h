@@ -192,11 +192,13 @@ static int Insert_List(struct FlowList* fl, struct Flow* f)
 					return 1;
 				}
 			}
-            //If the rule of next node is the same as our inserted flow, we just finish the insert  
+            //If the rule of next node is the same as our inserted flow, we just replace the existing node and finish the insert  
 			else if(Equal(&(tmp->next->f),f)==1) 
 			{
-				printk(KERN_INFO "Equal Flow\n");
-				return 0;
+                //Copy data for this new FlowNode
+                tmp->next->f=*f;
+				//printk(KERN_INFO "Equal Flow\n");
+				return 1;
 			}
             else //Move to next FlowNode
             {

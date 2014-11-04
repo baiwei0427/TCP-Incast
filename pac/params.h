@@ -3,6 +3,17 @@
 
 #include <linux/types.h>
 
+//microsecond to nanosecond
+#define US_TO_NS(x)	(x * 1E3L)
+//millisecond to nanosecond
+#define MS_TO_NS(x)	(x * 1E6L)
+//Slow start
+#define SLOW_START 0
+//Congestion avoidance
+#define CONGESTION_AVOIDANCE 1
+//Fast recovery
+#define FAST_RECOVERY 2
+
 //MSS: 1460 bytes
 static unsigned int MSS=1460;
 //TCP Initial Window (3MSS by default)
@@ -24,5 +35,8 @@ static unsigned int THROUGHPUT_SMOOTH=200;
 static unsigned int RTT_SMOOTH=875;
 //parameter to determine throughput reduction (alpha/1000)
 static unsigned int ALPHA=800;
+
+//priority threshold (bytes). It is 1MB by default in our experiments
+static unsigned long PRIO_THRESH=1024*1024;
 
 #endif 
