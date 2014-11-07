@@ -8,8 +8,9 @@
 struct Packet
 {
     int (*okfn)(struct sk_buff *); //function pointer to reinject packets
-    struct sk_buff *skb;                 //socket buffer pointer to packet   
-    unsigned int trigger;               //The size of traffic that this ACK packet can trigger
+    struct sk_buff *skb;                  //socket buffer pointer to packet   
+    unsigned int trigger;                //The size of traffic that this ACK packet can trigger
+    unsigned int enqueue_time;//Enqueue time
 }; 
 
 struct PacketQueue
@@ -33,7 +34,7 @@ static void Free_PacketQueue(struct PacketQueue* q)
 	vfree(q->packets);
 }
 
-static int Enqueue_PacketQueue(struct PacketQueue* q,struct sk_buff *skb,int (*okfn)(struct sk_buff *), unsigned int trigger)
+static int Enqueue_PacketQueue(struct PacketQueue* q,struct sk_buff *skb,int (*okfn)(struct sk_buff *), unsigned int trigger, unsigned int time)
 {
     unsigned long flags;                     //variable for save current states of irq
 	//There is capacity to contain new packets
@@ -45,6 +46,7 @@ static int Enqueue_PacketQueue(struct PacketQueue* q,struct sk_buff *skb,int (*o
 		q->packets[queueIndex].skb=skb;
 		q->packets[queueIndex].okfn=okfn;
         q->packets[queueIndex].trigger=trigger;
+        q->packets[queueIndex].enqueue_time=time;
 		q->size++;
         spin_unlock_irqrestore(&(q->queue_lock),flags);
 		return 1;

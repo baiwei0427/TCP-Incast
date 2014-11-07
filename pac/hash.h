@@ -84,7 +84,8 @@ static void Init_Info(struct Info* i)
     i->bytes_sent_total=0;
 	i->last_ack=0;
     i->last_seq=0;
-    //i->dup_ack=0;
+    i->last_throughput=0;    
+    i->throughput_reduction_num=0;
 	i->last_update=0;
 }
 

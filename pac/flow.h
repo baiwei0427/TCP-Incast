@@ -8,7 +8,9 @@
 //bytes_sent_total: The (incoming) bytes sent by this flow in total 
 //last_ack: The latest ACK number of this flow
 //last_seq: The latest sequence number of this flow
+//last_throughput: The latest incoming throughput of this flow (Mbps)
 //last_update: The last update time (unit: us)
+//throughput_reduction_num: the number of consecutive intervals of throughput reduction  
 struct Info
 {
 	unsigned int srtt;
@@ -17,7 +19,8 @@ struct Info
     unsigned long bytes_sent_total;
     unsigned int last_ack;
     unsigned int last_seq;
-    //unsigned short int dup_ack;
+    unsigned int last_throughput;
+    unsigned short int throughput_reduction_num;
 	unsigned int last_update;
 };
 
